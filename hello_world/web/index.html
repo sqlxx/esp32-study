@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ESP32 Web Bluetooth</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --accent: #3d9cfd;
+      --ok: #3ecf8e;
+      --err: #ff6b6b;
+      --line: #2a3548;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "PingFang SC", "Segoe UI", sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #1b3a5f 0%, transparent 50%),
+                  radial-gradient(900px 500px at 100% 0%, #243047 0%, transparent 45%),
+                  var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 24px 16px 40px;
+    }
+    main {
+      max-width: 420px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 1.35rem;
+      font-weight: 650;
+      margin: 0 0 6px;
+      letter-spacing: -0.02em;
+    }
+    .sub {
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.45;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: color-mix(in srgb, var(--panel) 92%, black);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      margin-bottom: 14px;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    button, input {
+      font: inherit;
+    }
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      background: var(--accent);
+      color: #041018;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    button.secondary {
+      background: #2b364a;
+      color: var(--text);
+    }
+    input[type="text"] {
+      flex: 1;
+      min-width: 140px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #111826;
+      color: var(--text);
+      padding: 10px 12px;
+    }
+    .status {
+      font-size: 0.92rem;
+      line-height: 1.4;
+    }
+    .status .ok { color: var(--ok); }
+    .status .err { color: var(--err); }
+    .label {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.88rem;
+      line-height: 1.45;
+      min-height: 1.4em;
+    }
+    .tips {
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .tips code {
+      color: #c9d7ef;
+      background: #121a27;
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    .servo-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    input[type="range"] {
+      flex: 1;
+      accent-color: var(--accent);
+    }
+    .angle {
+      min-width: 3.2em;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>ESP32 Web Bluetooth</h1>
+    <p class="sub">
+      Android Chrome：连接 <code>ESP32-Hello</code>，
+      读写 Service <code>0xFFE0</code> / Characteristic <code>0xFFE1</code>。
+      Write 命令：角度 <code>0~180</code>、<code>scan</code>、<code>stop</code>、<code>spd:1~10</code>。
+    </p>
+
+    <section class="card">
+      <div class="row">
+        <button id="btnConnect">连接设备</button>
+        <button id="btnDisconnect" class="secondary" disabled>断开</button>
+      </div>
+      <div class="status" id="status">未连接</div>
+    </section>
+
+    <section class="card">
+      <div class="label">舵机角度（SG90 / GPIO18）</div>
+      <div class="servo-row">
+        <input id="angleSlider" type="range" min="0" max="180" value="90" disabled />
+        <span class="angle" id="angleLabel">90°</span>
+      </div>
+      <div class="row" style="margin-top: 10px; margin-bottom: 0;">
+        <button id="btnAngle0" class="secondary" disabled>0°</button>
+        <button id="btnCenter" class="secondary" disabled>90°</button>
+        <button id="btnAngle180" class="secondary" disabled>180°</button>
+        <button id="btnScan" disabled>扫描</button>
+      </div>
+      <div class="label" style="margin-top: 14px;">扫描速度（1 慢 → 10 快）</div>
+      <div class="servo-row">
+        <input id="speedSlider" type="range" min="1" max="10" value="5" disabled />
+        <span class="angle" id="speedLabel">5</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="label">Read（设备状态）</div>
+      <div class="row">
+        <button id="btnRead" disabled>读取</button>
+      </div>
+      <pre id="readOut">—</pre>
+    </section>
+
+    <section class="card">
+      <div class="label">Write（文本，最多 20 字节）</div>
+      <div class="row">
+        <input id="writeInput" type="text" maxlength="20" placeholder="例如：90" disabled />
+        <button id="btnWrite" disabled>写入</button>
+      </div>
+    </section>
+
+    <section class="card tips">
+      <strong style="color: var(--text);">接线</strong><br />
+      橙/黄信号 → GPIO18，红 → 外部 5V，棕/黑 → GND（与 ESP32 共地）<br /><br />
+      <strong style="color: var(--text);">怎么打开</strong><br />
+      1. 电脑 Chrome：在本目录执行 <code>python3 -m http.server 8080</code>，
+      打开 <code>http://localhost:8080</code><br />
+      2. Android Chrome：需要 HTTPS。可执行 <code>python3 serve.py</code>，
+      手机访问提示的地址（证书警告选继续即可）<br />
+      3. 不支持 iPhone Safari
+    </section>
+  </main>
+
+  <script>
+    const SERVICE_UUID = 0xFFE0;
+    const CHAR_UUID = 0xFFE1;
+
+    const statusEl = document.getElementById("status");
+    const readOut = document.getElementById("readOut");
+    const writeInput = document.getElementById("writeInput");
+    const angleSlider = document.getElementById("angleSlider");
+    const angleLabel = document.getElementById("angleLabel");
+    const btnConnect = document.getElementById("btnConnect");
+    const btnDisconnect = document.getElementById("btnDisconnect");
+    const btnRead = document.getElementById("btnRead");
+    const btnWrite = document.getElementById("btnWrite");
+    const btnAngle0 = document.getElementById("btnAngle0");
+    const btnCenter = document.getElementById("btnCenter");
+    const btnAngle180 = document.getElementById("btnAngle180");
+    const btnScan = document.getElementById("btnScan");
+    const speedSlider = document.getElementById("speedSlider");
+    const speedLabel = document.getElementById("speedLabel");
+
+    let device = null;
+    let server = null;
+    let characteristic = null;
+    let writeBusy = false;
+    let pendingAngle = null;
+    let lastWriteAt = 0;
+    const WRITE_MIN_INTERVAL_MS = 40;
+    let scanRunning = false;
+    let scanPollTimer = null;
+
+    function setStatus(html, ok) {
+      statusEl.innerHTML = ok === true
+        ? `<span class="ok">${html}</span>`
+        : ok === false
+          ? `<span class="err">${html}</span>`
+          : html;
+    }
+
+    function setScanUi(running) {
+      scanRunning = running;
+      btnScan.textContent = running ? "停止扫描" : "扫描";
+      const connected = !!characteristic;
+      angleSlider.disabled = !connected || running;
+      btnAngle0.disabled = !connected || running;
+      btnCenter.disabled = !connected || running;
+      btnAngle180.disabled = !connected || running;
+      speedSlider.disabled = !connected;
+      btnScan.disabled = !connected;
+    }
+
+    function setConnected(connected) {
+      btnConnect.disabled = connected;
+      btnDisconnect.disabled = !connected;
+      btnRead.disabled = !connected;
+      btnWrite.disabled = !connected;
+      writeInput.disabled = !connected;
+      if (!connected) {
+        stopScanPoll();
+        setScanUi(false);
+        angleSlider.disabled = true;
+        btnAngle0.disabled = true;
+        btnCenter.disabled = true;
+        btnAngle180.disabled = true;
+        speedSlider.disabled = true;
+        btnScan.disabled = true;
+      } else {
+        setScanUi(false);
+      }
+    }
+
+    function decoder(value) {
+      return new TextDecoder("utf-8").decode(value);
+    }
+
+    async function bleWriteText(text) {
+      const data = new TextEncoder().encode(text);
+      if (characteristic.properties.writeWithoutResponse) {
+        await characteristic.writeValueWithoutResponse(data);
+      } else {
+        await characteristic.writeValue(data);
+      }
+      lastWriteAt = Date.now();
+      writeInput.value = text;
+    }
+
+    async function writeAngle(angle) {
+      const text = String(Math.round(angle));
+      await bleWriteText(text);
+      setStatus(`舵机 ${text}°`, true);
+    }
+
+    async function flushAngle() {
+      if (!characteristic || writeBusy || pendingAngle === null) {
+        return;
+      }
+
+      const wait = WRITE_MIN_INTERVAL_MS - (Date.now() - lastWriteAt);
+      if (wait > 0) {
+        setTimeout(flushAngle, wait);
+        return;
+      }
+
+      const angle = pendingAngle;
+      pendingAngle = null;
+      writeBusy = true;
+      try {
+        await writeAngle(angle);
+      } catch (err) {
+        setStatus(`设置失败：${err.message}`, false);
+      } finally {
+        writeBusy = false;
+        if (pendingAngle !== null) {
+          flushAngle();
+        }
+      }
+    }
+
+    function queueAngle(angle) {
+      pendingAngle = Math.round(angle);
+      flushAngle();
+    }
+
+    function applyAngle(angle) {
+      const a = Math.max(0, Math.min(180, Math.round(angle)));
+      angleSlider.value = a;
+      angleLabel.textContent = `${a}°`;
+      if (characteristic) {
+        queueAngle(a);
+      }
+    }
+
+    function stopScanPoll() {
+      if (scanPollTimer) {
+        clearInterval(scanPollTimer);
+        scanPollTimer = null;
+      }
+    }
+
+    function startScanPoll() {
+      stopScanPoll();
+      scanPollTimer = setInterval(async () => {
+        if (!characteristic || !scanRunning) {
+          return;
+        }
+        try {
+          const value = await characteristic.readValue();
+          const text = decoder(value);
+          const m = text.match(/servo=(\d+)/);
+          if (m) {
+            angleSlider.value = m[1];
+            angleLabel.textContent = `${m[1]}°`;
+          }
+          if (/scan=0/.test(text)) {
+            stopScanPoll();
+            setScanUi(false);
+            setStatus("扫描已停止");
+          }
+        } catch (_) {
+          /* ignore transient read errors while scanning */
+        }
+      }, 400);
+    }
+
+    async function sendScan(start) {
+      if (!characteristic) {
+        return;
+      }
+      try {
+        if (start) {
+          await bleWriteText(`spd:${speedSlider.value}`);
+          await bleWriteText("scan");
+          setScanUi(true);
+          startScanPoll();
+          setStatus(`板端扫描中（速度 ${speedSlider.value}）`, true);
+        } else {
+          await bleWriteText("stop");
+          stopScanPoll();
+          setScanUi(false);
+          setStatus("扫描已停止");
+        }
+      } catch (err) {
+        setStatus(`扫描命令失败：${err.message}`, false);
+      }
+    }
+
+    async function sendSpeed() {
+      if (!characteristic) {
+        return;
+      }
+      const level = speedSlider.value;
+      speedLabel.textContent = level;
+      try {
+        await bleWriteText(`spd:${level}`);
+        setStatus(`扫描速度 ${level}`, true);
+      } catch (err) {
+        setStatus(`设置速度失败：${err.message}`, false);
+      }
+    }
+
+    async function connect() {
+      if (!navigator.bluetooth) {
+        setStatus("当前浏览器不支持 Web Bluetooth（请用 Android Chrome）", false);
+        return;
+      }
+
+      try {
+        setStatus("正在请求设备…");
+        device = await navigator.bluetooth.requestDevice({
+          filters: [{ services: [SERVICE_UUID] }],
+          optionalServices: [SERVICE_UUID],
+        });
+
+        device.addEventListener("gattserverdisconnected", () => {
+          characteristic = null;
+          server = null;
+          stopScanPoll();
+          setConnected(false);
+          setStatus("已断开", false);
+        });
+
+        setStatus(`已选择 ${device.name || "未知设备"}，连接中…`);
+        server = await device.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        characteristic = await service.getCharacteristic(CHAR_UUID);
+
+        setConnected(true);
+        setStatus(`已连接：${device.name || "ESP32"}`, true);
+      } catch (err) {
+        setStatus(`连接失败：${err.message}`, false);
+        setConnected(false);
+      }
+    }
+
+    async function disconnect() {
+      if (scanRunning && characteristic) {
+        try { await bleWriteText("stop"); } catch (_) {}
+      }
+      stopScanPoll();
+      if (device && device.gatt.connected) {
+        device.gatt.disconnect();
+      }
+      setConnected(false);
+      setStatus("已断开");
+    }
+
+    async function readValue() {
+      try {
+        const value = await characteristic.readValue();
+        const text = decoder(value);
+        readOut.textContent = text;
+        const m = text.match(/servo=(\d+)/);
+        if (m) {
+          angleSlider.value = m[1];
+          angleLabel.textContent = `${m[1]}°`;
+        }
+        const spd = text.match(/spd=(\d+)/);
+        if (spd) {
+          speedSlider.value = spd[1];
+          speedLabel.textContent = spd[1];
+        }
+        if (/scan=1/.test(text)) {
+          setScanUi(true);
+          startScanPoll();
+        } else {
+          setScanUi(false);
+          stopScanPoll();
+        }
+        setStatus("读取成功", true);
+      } catch (err) {
+        setStatus(`读取失败：${err.message}`, false);
+      }
+    }
+
+    async function writeValue() {
+      const text = writeInput.value;
+      if (!text) {
+        setStatus("请先输入要写入的内容", false);
+        return;
+      }
+      try {
+        const data = new TextEncoder().encode(text);
+        await characteristic.writeValue(data);
+        setStatus(`已写入 ${data.length} 字节`, true);
+        // 手动命令可能改变扫描状态，回读同步 UI
+        await readValue();
+      } catch (err) {
+        setStatus(`写入失败：${err.message}`, false);
+      }
+    }
+
+    angleSlider.addEventListener("input", () => {
+      angleLabel.textContent = `${angleSlider.value}°`;
+      if (characteristic && !scanRunning) {
+        queueAngle(angleSlider.value);
+      }
+    });
+
+    let speedSendTimer = null;
+    speedSlider.addEventListener("input", () => {
+      speedLabel.textContent = speedSlider.value;
+      clearTimeout(speedSendTimer);
+      speedSendTimer = setTimeout(sendSpeed, 120);
+    });
+
+    btnConnect.addEventListener("click", connect);
+    btnDisconnect.addEventListener("click", disconnect);
+    btnRead.addEventListener("click", readValue);
+    btnWrite.addEventListener("click", writeValue);
+    btnAngle0.addEventListener("click", () => applyAngle(0));
+    btnCenter.addEventListener("click", () => applyAngle(90));
+    btnAngle180.addEventListener("click", () => applyAngle(180));
+    btnScan.addEventListener("click", () => sendScan(!scanRunning));
+
+    if (!window.isSecureContext) {
+      setStatus("当前不是安全上下文。Web Bluetooth 需要 HTTPS 或 localhost。", false);
+    } else if (!navigator.bluetooth) {
+      setStatus("未检测到 Web Bluetooth（请用 Android / 桌面 Chrome）", false);
+    }
+  </script>
+</body>
+</html>
