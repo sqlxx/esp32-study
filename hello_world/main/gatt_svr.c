@@ -1,10 +1,14 @@
+#include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
+
+#include "bmi088.h"
 #include "esp_mac.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "gatt_svr.h"
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
 #include "services/gap/ble_svc_gap.h"
@@ -19,6 +23,18 @@ static const ble_uuid16_t svc_uuid =
 static const ble_uuid16_t chr_uuid =
     BLE_UUID16_INIT(0xFFE1);
 
+/* IMU 通知：0000ffe2-0000-1000-8000-00805f9b34fb */
+static const ble_uuid16_t imu_chr_uuid =
+    BLE_UUID16_INIT(0xFFE2);
+
+#define IMU_PAYLOAD_LEN 12
+
+static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+static uint16_t s_imu_val_handle;
+static bool s_imu_notify;
+static uint8_t s_imu_last[IMU_PAYLOAD_LEN];
+static uint16_t s_imu_last_len;
+
 /* 最近一次 Write 的内容（最多 20 字节） */
 #define WRITE_BUF_SIZE 20
 static uint8_t write_buf[WRITE_BUF_SIZE];
@@ -26,6 +42,8 @@ static uint16_t write_len;
 
 static int chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                          struct ble_gatt_access_ctxt *ctxt, void *arg);
+static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                             struct ble_gatt_access_ctxt *ctxt, void *arg);
 
 static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     {
@@ -40,6 +58,12 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
                          BLE_GATT_CHR_F_WRITE_NO_RSP,
             },
             {
+                .uuid = &imu_chr_uuid.u,
+                .access_cb = imu_chr_access_cb,
+                .val_handle = &s_imu_val_handle,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+            },
+            {
                 0,
             },
         },
@@ -48,6 +72,30 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
         0,
     },
 };
+
+static int16_t clamp_i16(long v)
+{
+    if (v > 32767) {
+        return 32767;
+    }
+    if (v < -32768) {
+        return (int16_t)-32768;
+    }
+    return (int16_t)v;
+}
+
+static void pack_imu(uint8_t out[IMU_PAYLOAD_LEN], const bmi088_vec3_t *acc, const bmi088_vec3_t *gyr)
+{
+    int16_t v[6] = {
+        clamp_i16(lroundf(acc->x * 1000.0f)),
+        clamp_i16(lroundf(acc->y * 1000.0f)),
+        clamp_i16(lroundf(acc->z * 1000.0f)),
+        clamp_i16(lroundf(gyr->x * 10.0f)),
+        clamp_i16(lroundf(gyr->y * 10.0f)),
+        clamp_i16(lroundf(gyr->z * 10.0f)),
+    };
+    memcpy(out, v, IMU_PAYLOAD_LEN);
+}
 
 static const char *reset_reason_str(esp_reset_reason_t reason)
 {
@@ -214,6 +262,64 @@ static int chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
 
     default:
         return BLE_ATT_ERR_UNLIKELY;
+    }
+}
+
+static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                             struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    uint8_t zeros[IMU_PAYLOAD_LEN] = {0};
+    const uint8_t *data = s_imu_last_len ? s_imu_last : zeros;
+    int rc = os_mbuf_append(ctxt->om, data, IMU_PAYLOAD_LEN);
+    return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
+void gatt_svr_on_connect(uint16_t conn_handle)
+{
+    s_conn_handle = conn_handle;
+}
+
+void gatt_svr_on_disconnect(void)
+{
+    s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    s_imu_notify = false;
+}
+
+void gatt_svr_on_subscribe(uint16_t attr_handle, uint16_t conn_handle, bool notify_enabled)
+{
+    if (attr_handle != s_imu_val_handle) {
+        return;
+    }
+    s_conn_handle = conn_handle;
+    s_imu_notify = notify_enabled;
+    printf("IMU notify %s, conn=%u\n", notify_enabled ? "on" : "off", conn_handle);
+}
+
+void gatt_svr_notify_imu(const bmi088_vec3_t *acc, const bmi088_vec3_t *gyr)
+{
+    if (!s_imu_notify || s_conn_handle == BLE_HS_CONN_HANDLE_NONE || acc == NULL || gyr == NULL) {
+        return;
+    }
+
+    pack_imu(s_imu_last, acc, gyr);
+    s_imu_last_len = IMU_PAYLOAD_LEN;
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(s_imu_last, IMU_PAYLOAD_LEN);
+    if (om == NULL) {
+        return;
+    }
+
+    int rc = ble_gatts_notify_custom(s_conn_handle, s_imu_val_handle, om);
+    if (rc != 0) {
+        /* 连接繁忙时丢一帧，避免堵死采样任务 */
     }
 }
 

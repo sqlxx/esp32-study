@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ESP32 Web Bluetooth</title>
+  <title>ESP32 IMU / 舵机</title>
   <style>
     :root {
       --bg: #0f1419;
@@ -27,7 +27,7 @@
       padding: 24px 16px 40px;
     }
     main {
-      max-width: 420px;
+      max-width: 880px;
       margin: 0 auto;
     }
     h1 {
@@ -132,23 +132,123 @@
       font-variant-numeric: tabular-nums;
       font-weight: 600;
     }
+    .view-wrap {
+      position: relative;
+    }
+    #view {
+      width: 100%;
+      height: 380px;
+      display: block;
+      border-radius: 10px;
+      background: #0b111a;
+    }
+    .axis-legend {
+      position: absolute;
+      left: 12px;
+      bottom: 12px;
+      display: flex;
+      gap: 10px;
+      pointer-events: none;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-weight: 700;
+      font-size: 0.82rem;
+    }
+    .axis-legend span {
+      padding: 2px 8px;
+      border-radius: 6px;
+      background: #0b111acc;
+    }
+    .axis-legend .x { color: #ff6b6b; }
+    .axis-legend .y { color: #3ecf8e; }
+    .axis-legend .z { color: #3d9cfd; }
+    .imu-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .imu-cell {
+      background: #111826;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .imu-cell .k {
+      font-size: 0.72rem;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .imu-cell .v {
+      white-space: pre;
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum" 1;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.92rem;
+      line-height: 1.5;
+    }
+    .imu-flag {
+      margin-top: 6px;
+      min-height: 1.2em;
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+    @media (max-width: 640px) {
+      #view { height: 280px; }
+      .imu-grid { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
   <main>
-    <h1>ESP32 Web Bluetooth</h1>
+    <h1>ESP32 IMU / 舵机</h1>
     <p class="sub">
-      Android Chrome：连接 <code>ESP32-Hello</code>，
-      读写 Service <code>0xFFE0</code> / Characteristic <code>0xFFE1</code>。
-      Write 命令：角度 <code>0~180</code>、<code>scan</code>、<code>stop</code>、<code>spd:1~10</code>。
+      Chrome 连接 <code>ESP32-Hello</code>。连接后请先放平静止约 1.5 秒校准陀螺零偏；
+      静止时冻结偏航，运动后再放下也会稳住。无磁力计，转圈后的绝对朝向仍可能慢慢偏。
     </p>
 
     <section class="card">
       <div class="row">
         <button id="btnConnect">连接设备</button>
         <button id="btnDisconnect" class="secondary" disabled>断开</button>
+        <button id="btnCalib" class="secondary" disabled>校准零偏</button>
+        <button id="btnResetYaw" class="secondary" disabled>复位偏航</button>
       </div>
       <div class="status" id="status">未连接</div>
+    </section>
+
+    <section class="card">
+      <div class="label">BMI088 姿态（红 X / 绿 Y / 蓝 Z）</div>
+      <div class="view-wrap">
+        <canvas id="view"></canvas>
+        <div class="axis-legend">
+          <span class="x">X</span>
+          <span class="y">Y</span>
+          <span class="z">Z</span>
+        </div>
+      </div>
+      <div class="imu-grid">
+        <div class="imu-cell">
+          <div class="k">Accel (g)</div>
+          <div class="v" id="accOut">X +00.000
+Y +00.000
+Z +00.000</div>
+        </div>
+        <div class="imu-cell">
+          <div class="k">Gyro 去零偏 (dps)</div>
+          <div class="v" id="gyrOut">X +000.0
+Y +000.0
+Z +000.0</div>
+        </div>
+        <div class="imu-cell">
+          <div class="k">RPY (°)</div>
+          <div class="v" id="rpyOut">R +000.0
+P +000.0
+Y +000.0</div>
+          <div class="imu-flag" id="imuState">　　</div>
+        </div>
+      </div>
     </section>
 
     <section class="card">
@@ -187,20 +287,38 @@
     </section>
 
     <section class="card tips">
-      <strong style="color: var(--text);">接线</strong><br />
-      橙/黄信号 → GPIO18，红 → 外部 5V，棕/黑 → GND（与 ESP32 共地）<br /><br />
       <strong style="color: var(--text);">怎么打开</strong><br />
-      1. 电脑 Chrome：在本目录执行 <code>python3 -m http.server 8080</code>，
+      1. 电脑 Chrome：在 <code>web/</code> 执行 <code>python3 -m http.server 8080</code>，
       打开 <code>http://localhost:8080</code><br />
-      2. Android Chrome：需要 HTTPS。可执行 <code>python3 serve.py</code>，
-      手机访问提示的地址（证书警告选继续即可）<br />
-      3. 不支持 iPhone Safari
+      2. Android Chrome：执行 <code>python3 serve.py</code>，手机访问提示的 HTTPS 地址<br />
+      3. 不支持 iPhone Safari<br /><br />
+      <strong style="color: var(--text);">BLE</strong>
+      Service <code>0xFFE0</code> / 舵机 <code>0xFFE1</code> / IMU Notify <code>0xFFE2</code>
     </section>
   </main>
 
-  <script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
     const SERVICE_UUID = 0xFFE0;
     const CHAR_UUID = 0xFFE1;
+    const IMU_UUID = 0xFFE2;
+    const DEG = Math.PI / 180;
+    const ALPHA = 0.98;
+    const CALIB_MS = 1500;
+    const CALIB_GYR_STD = 2.5;
+    const STILL_GYR = 2.5;
+    const STILL_ACC_DEV = 0.12;
+    const BIAS_ADAPT = 0.002;
 
     const statusEl = document.getElementById("status");
     const readOut = document.getElementById("readOut");
@@ -209,6 +327,8 @@
     const angleLabel = document.getElementById("angleLabel");
     const btnConnect = document.getElementById("btnConnect");
     const btnDisconnect = document.getElementById("btnDisconnect");
+    const btnCalib = document.getElementById("btnCalib");
+    const btnResetYaw = document.getElementById("btnResetYaw");
     const btnRead = document.getElementById("btnRead");
     const btnWrite = document.getElementById("btnWrite");
     const btnAngle0 = document.getElementById("btnAngle0");
@@ -217,16 +337,286 @@
     const btnScan = document.getElementById("btnScan");
     const speedSlider = document.getElementById("speedSlider");
     const speedLabel = document.getElementById("speedLabel");
+    const accOut = document.getElementById("accOut");
+    const gyrOut = document.getElementById("gyrOut");
+    const rpyOut = document.getElementById("rpyOut");
+    const imuState = document.getElementById("imuState");
+    const canvas = document.getElementById("view");
 
     let device = null;
     let server = null;
     let characteristic = null;
+    let imuChar = null;
     let writeBusy = false;
     let pendingAngle = null;
     let lastWriteAt = 0;
     const WRITE_MIN_INTERVAL_MS = 40;
     let scanRunning = false;
     let scanPollTimer = null;
+
+    let roll = 0;
+    let pitch = 0;
+    let yaw = 0;
+    let lastImuT = 0;
+    let gyroBias = { x: 0, y: 0, z: 0 };
+    let calibrating = false;
+    let calibBuf = [];
+    let lastCalibHint = 0;
+
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x0b111a, 1);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 50);
+    camera.position.set(2.4, 1.8, 2.6);
+
+    const controls = new OrbitControls(camera, canvas);
+    controls.enableDamping = true;
+    controls.target.set(0, 0.4, 0);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    const key = new THREE.DirectionalLight(0xffffff, 1.05);
+    key.position.set(3, 5, 2);
+    scene.add(key);
+    const fill = new THREE.DirectionalLight(0x6aa8ff, 0.35);
+    fill.position.set(-3, 1, -2);
+    scene.add(fill);
+
+    const grid = new THREE.GridHelper(6, 12, 0x3d4d66, 0x223044);
+    scene.add(grid);
+
+    function makeAxisArrow(dir, color, length) {
+      return new THREE.ArrowHelper(dir, new THREE.Vector3(0, 0, 0), length, color, 0.28, 0.14);
+    }
+
+    function makeAxisLabel(text, color, position) {
+      const c = document.createElement("canvas");
+      c.width = 128;
+      c.height = 128;
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = color;
+      ctx.font = "700 80px ui-sans-serif, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text, 64, 72);
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: new THREE.CanvasTexture(c),
+        transparent: true,
+        depthTest: false,
+      }));
+      sprite.position.copy(position);
+      sprite.scale.set(0.3, 0.3, 0.3);
+      return sprite;
+    }
+
+    const imuGroup = new THREE.Group();
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(0.55, 0.12, 0.8),
+      new THREE.MeshStandardMaterial({ color: 0x2b364a, metalness: 0.2, roughness: 0.55 })
+    );
+    imuGroup.add(
+      body,
+      makeAxisArrow(new THREE.Vector3(1, 0, 0), 0xff6b6b, 1.35),
+      makeAxisArrow(new THREE.Vector3(0, 1, 0), 0x3ecf8e, 1.35),
+      makeAxisArrow(new THREE.Vector3(0, 0, 1), 0x3d9cfd, 1.35),
+      makeAxisLabel("X", "#ff6b6b", new THREE.Vector3(1.55, 0, 0)),
+      makeAxisLabel("Y", "#3ecf8e", new THREE.Vector3(0, 1.55, 0)),
+      makeAxisLabel("Z", "#3d9cfd", new THREE.Vector3(0, 0, 1.55))
+    );
+    scene.add(imuGroup);
+
+    const zUpToYUp = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+    const euler = new THREE.Euler(0, 0, 0, "ZYX");
+    const qImu = new THREE.Quaternion();
+
+    function resizeRenderer() {
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      if (canvas.width !== w || canvas.height !== h) {
+        renderer.setSize(w, h, false);
+        camera.aspect = w / Math.max(h, 1);
+        camera.updateProjectionMatrix();
+      }
+    }
+
+    function applyAttitude() {
+      euler.set(roll, pitch, yaw, "ZYX");
+      qImu.setFromEuler(euler);
+      imuGroup.quaternion.copy(zUpToYUp).multiply(qImu);
+    }
+
+    function tick() {
+      resizeRenderer();
+      controls.update();
+      applyAttitude();
+      renderer.render(scene, camera);
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+
+    function fmtFixed(v, intDigits, fracDigits) {
+      const width = 1 + intDigits + 1 + fracDigits;
+      if (!Number.isFinite(v)) {
+        return "—".padStart(width, " ");
+      }
+      if (Math.abs(v) < 0.5 * 10 ** -fracDigits) {
+        v = 0;
+      }
+      const sign = v < 0 ? "-" : "+";
+      const body = Math.abs(v).toFixed(fracDigits);
+      const dot = body.indexOf(".");
+      const intPart = body.slice(0, dot);
+      const fracPart = body.slice(dot + 1);
+      return sign + intPart.slice(-intDigits).padStart(intDigits, "0") + "." + fracPart;
+    }
+
+    function fmtAxes(x, y, z, intDigits, fracDigits, labels) {
+      return [
+        `${labels[0]} ${fmtFixed(x, intDigits, fracDigits)}`,
+        `${labels[1]} ${fmtFixed(y, intDigits, fracDigits)}`,
+        `${labels[2]} ${fmtFixed(z, intDigits, fracDigits)}`,
+      ].join("\n");
+    }
+
+    function wrapPi(a) {
+      while (a > Math.PI) {
+        a -= Math.PI * 2;
+      }
+      while (a < -Math.PI) {
+        a += Math.PI * 2;
+      }
+      return a;
+    }
+
+    function paintImu(acc, gyr, state) {
+      accOut.textContent = fmtAxes(acc.x, acc.y, acc.z, 2, 3, ["X", "Y", "Z"]);
+      gyrOut.textContent = fmtAxes(gyr.x, gyr.y, gyr.z, 3, 1, ["X", "Y", "Z"]);
+      rpyOut.textContent = fmtAxes(roll / DEG, pitch / DEG, yaw / DEG, 3, 1, ["R", "P", "Y"]);
+      imuState.textContent = state;
+    }
+
+    function meanGyro(samples) {
+      const n = samples.length;
+      const s = { x: 0, y: 0, z: 0 };
+      for (const g of samples) {
+        s.x += g.x;
+        s.y += g.y;
+        s.z += g.z;
+      }
+      return { x: s.x / n, y: s.y / n, z: s.z / n };
+    }
+
+    function gyroRms(samples, mean) {
+      let acc2 = 0;
+      for (const g of samples) {
+        const dx = g.x - mean.x;
+        const dy = g.y - mean.y;
+        const dz = g.z - mean.z;
+        acc2 += dx * dx + dy * dy + dz * dz;
+      }
+      return Math.sqrt(acc2 / samples.length);
+    }
+
+    function applyAccelTilt(acc) {
+      const an = Math.hypot(acc.x, acc.y, acc.z);
+      if (an > 0.5 && an < 2.0) {
+        const rollAcc = Math.atan2(acc.y, acc.z);
+        const pitchAcc = Math.atan2(-acc.x, Math.hypot(acc.y, acc.z));
+        roll = ALPHA * roll + (1 - ALPHA) * rollAcc;
+        pitch = ALPHA * pitch + (1 - ALPHA) * pitchAcc;
+      }
+    }
+
+    function beginGyroCalib() {
+      calibrating = true;
+      calibBuf = [];
+      lastImuT = 0;
+      lastCalibHint = 0;
+      setStatus("请保持模块静止，正在校准陀螺零偏…");
+    }
+
+    function finishGyroCalib(mean) {
+      gyroBias = mean;
+      calibrating = false;
+      calibBuf = [];
+      yaw = 0;
+      lastImuT = 0;
+      setStatus(
+        `零偏已校准：${mean.x.toFixed(2)} ${mean.y.toFixed(2)} ${mean.z.toFixed(2)} dps`,
+        true
+      );
+    }
+
+    function updateImu(acc, gyr) {
+      const now = performance.now();
+      const dt = lastImuT ? Math.min(0.1, (now - lastImuT) / 1000) : 0.02;
+      lastImuT = now;
+
+      if (calibrating) {
+        calibBuf.push({ t: now, ...gyr });
+        const cutoff = now - CALIB_MS;
+        while (calibBuf.length && calibBuf[0].t < cutoff) {
+          calibBuf.shift();
+        }
+        applyAccelTilt(acc);
+        const span = calibBuf.length ? now - calibBuf[0].t : 0;
+        if (span >= CALIB_MS - 20 && calibBuf.length >= 20) {
+          const mean = meanGyro(calibBuf);
+          if (gyroRms(calibBuf, mean) <= CALIB_GYR_STD) {
+            finishGyroCalib(mean);
+          } else if (now - lastCalibHint > 800) {
+            lastCalibHint = now;
+            setStatus("检测到晃动，请放平并保持静止…");
+          }
+        }
+        paintImu(acc, gyr, "校准");
+        return;
+      }
+
+      const gyrCal = {
+        x: gyr.x - gyroBias.x,
+        y: gyr.y - gyroBias.y,
+        z: gyr.z - gyroBias.z,
+      };
+      const still =
+        Math.abs(Math.hypot(acc.x, acc.y, acc.z) - 1) < STILL_ACC_DEV &&
+        Math.hypot(gyrCal.x, gyrCal.y, gyrCal.z) < STILL_GYR;
+
+      if (still) {
+        gyroBias.x += BIAS_ADAPT * (gyr.x - gyroBias.x);
+        gyroBias.y += BIAS_ADAPT * (gyr.y - gyroBias.y);
+        gyroBias.z += BIAS_ADAPT * (gyr.z - gyroBias.z);
+      } else {
+        roll += gyrCal.x * DEG * dt;
+        pitch += gyrCal.y * DEG * dt;
+        yaw += gyrCal.z * DEG * dt;
+      }
+
+      applyAccelTilt(acc);
+      yaw = wrapPi(yaw);
+
+      paintImu(acc, gyrCal, still ? "静止" : "运动");
+    }
+
+    function onImuNotify(event) {
+      const v = event.target.value;
+      if (v.byteLength < 12) {
+        return;
+      }
+      updateImu(
+        {
+          x: v.getInt16(0, true) / 1000,
+          y: v.getInt16(2, true) / 1000,
+          z: v.getInt16(4, true) / 1000,
+        },
+        {
+          x: v.getInt16(6, true) / 10,
+          y: v.getInt16(8, true) / 10,
+          z: v.getInt16(10, true) / 10,
+        }
+      );
+    }
 
     function setStatus(html, ok) {
       statusEl.innerHTML = ok === true
@@ -251,6 +641,8 @@
     function setConnected(connected) {
       btnConnect.disabled = connected;
       btnDisconnect.disabled = !connected;
+      btnCalib.disabled = !connected;
+      btnResetYaw.disabled = !connected;
       btnRead.disabled = !connected;
       btnWrite.disabled = !connected;
       writeInput.disabled = !connected;
@@ -263,6 +655,10 @@
         btnAngle180.disabled = true;
         speedSlider.disabled = true;
         btnScan.disabled = true;
+        lastImuT = 0;
+        calibrating = false;
+        calibBuf = [];
+        gyroBias = { x: 0, y: 0, z: 0 };
       } else {
         setScanUi(false);
       }
@@ -397,9 +793,24 @@
       }
     }
 
+    async function stopImuNotify() {
+      if (!imuChar) {
+        return;
+      }
+      try {
+        imuChar.removeEventListener("characteristicvaluechanged", onImuNotify);
+        if (imuChar.properties.notify) {
+          await imuChar.stopNotifications();
+        }
+      } catch (_) {
+        /* ignore */
+      }
+      imuChar = null;
+    }
+
     async function connect() {
       if (!navigator.bluetooth) {
-        setStatus("当前浏览器不支持 Web Bluetooth（请用 Android Chrome）", false);
+        setStatus("当前浏览器不支持 Web Bluetooth（请用 Android / 桌面 Chrome）", false);
         return;
       }
 
@@ -413,6 +824,7 @@
         device.addEventListener("gattserverdisconnected", () => {
           characteristic = null;
           server = null;
+          imuChar = null;
           stopScanPoll();
           setConnected(false);
           setStatus("已断开", false);
@@ -422,10 +834,14 @@
         server = await device.gatt.connect();
         const service = await server.getPrimaryService(SERVICE_UUID);
         characteristic = await service.getCharacteristic(CHAR_UUID);
+        imuChar = await service.getCharacteristic(IMU_UUID);
+        imuChar.addEventListener("characteristicvaluechanged", onImuNotify);
+        await imuChar.startNotifications();
 
         setConnected(true);
-        setStatus(`已连接：${device.name || "ESP32"}`, true);
+        beginGyroCalib();
       } catch (err) {
+        await stopImuNotify();
         setStatus(`连接失败：${err.message}`, false);
         setConnected(false);
       }
@@ -436,6 +852,7 @@
         try { await bleWriteText("stop"); } catch (_) {}
       }
       stopScanPoll();
+      await stopImuNotify();
       if (device && device.gatt.connected) {
         device.gatt.disconnect();
       }
@@ -481,7 +898,6 @@
         const data = new TextEncoder().encode(text);
         await characteristic.writeValue(data);
         setStatus(`已写入 ${data.length} 字节`, true);
-        // 手动命令可能改变扫描状态，回读同步 UI
         await readValue();
       } catch (err) {
         setStatus(`写入失败：${err.message}`, false);
@@ -504,6 +920,11 @@
 
     btnConnect.addEventListener("click", connect);
     btnDisconnect.addEventListener("click", disconnect);
+    btnCalib.addEventListener("click", beginGyroCalib);
+    btnResetYaw.addEventListener("click", () => {
+      yaw = 0;
+      setStatus("已复位偏航", true);
+    });
     btnRead.addEventListener("click", readValue);
     btnWrite.addEventListener("click", writeValue);
     btnAngle0.addEventListener("click", () => applyAngle(0));

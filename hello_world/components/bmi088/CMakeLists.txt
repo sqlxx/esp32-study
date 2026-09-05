@@ -1,0 +1,17 @@
+idf_component_register(
+    SRCS
+        "bmi088.c"
+        "bmi088_port.c"
+        "bosch/bmi08a.c"
+        "bosch/bmi08g.c"
+        "bosch/bmi08xa.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_INCLUDE_DIRS
+        "."
+        "bosch"
+    PRIV_REQUIRES
+        esp_driver_spi
+        esp_driver_gpio
+        freertos
+)

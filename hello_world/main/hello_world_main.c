@@ -13,14 +13,18 @@
 #include "host/ble_uuid.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "bmi088.h"
+#include "gatt_svr.h"
 #include "servo.h"
 
 static const char *TAG = "BLE";
+static const char *IMU_TAG = "IMU";
 static const char *DEVICE_NAME = "ESP32-Hello";
 
 static uint8_t own_addr_type;
 
-int gatt_svr_init(void);
 static int gap_event_handler(struct ble_gap_event *event, void *arg);
 
 static void print_mac(const char *label, const uint8_t *addr)
@@ -93,8 +97,9 @@ static void start_advertising(void)
     }
 
     printf("正在广播，设备名: %s, Service: 0xFFE0\n", name);
-    printf("可用 nRF Connect，或打开 web/index.html（Android Chrome）\n");
-    printf("Characteristic 0xFFE1: Write 角度 / scan / stop / spd:1~10\n");
+    printf("可用 nRF Connect，或打开 web/index.html（Chrome + Web Bluetooth）\n");
+    printf("0xFFE1: Write 角度 / scan / stop / spd:1~10\n");
+    printf("0xFFE2: Notify IMU acc[g] + gyro[dps]\n");
 }
 
 static int gap_event_handler(struct ble_gap_event *event, void *arg)
@@ -105,6 +110,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
+            gatt_svr_on_connect(event->connect.conn_handle);
             rc = ble_gap_conn_find(event->connect.conn_handle, &desc);
             if (rc == 0) {
                 printf("\n手机已连接!\n");
@@ -117,9 +123,16 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
+        gatt_svr_on_disconnect();
         printf("\n手机已断开, reason=%d\n", event->disconnect.reason);
         print_conn_desc(&event->disconnect.conn);
         start_advertising();
+        return 0;
+
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        gatt_svr_on_subscribe(event->subscribe.attr_handle,
+                              event->subscribe.conn_handle,
+                              event->subscribe.cur_notify != 0);
         return 0;
 
     case BLE_GAP_EVENT_CONN_UPDATE:
@@ -177,6 +190,29 @@ static void host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
+static void imu_log_task(void *arg)
+{
+    (void)arg;
+    bmi088_vec3_t acc;
+    bmi088_vec3_t gyr;
+
+    int log_div = 0;
+
+    while (true) {
+        if (bmi088_read_accel(&acc) == ESP_OK && bmi088_read_gyro(&gyr) == ESP_OK) {
+            gatt_svr_notify_imu(&acc, &gyr);
+            if (++log_div >= 10) {
+                log_div = 0;
+                ESP_LOGI(IMU_TAG, "acc[g] %7.3f %7.3f %7.3f  gyro[dps] %8.2f %8.2f %8.2f",
+                         acc.x, acc.y, acc.z, gyr.x, gyr.y, gyr.z);
+            }
+        } else {
+            ESP_LOGE(IMU_TAG, "read failed");
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
 void app_main(void)
 {
     int rc;
@@ -191,6 +227,16 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
 
     ESP_ERROR_CHECK(servo_init());
+
+    ret = bmi088_init();
+    if (ret == ESP_OK) {
+        BaseType_t ok = xTaskCreate(imu_log_task, "imu_log", 3072, NULL, 4, NULL);
+        if (ok != pdPASS) {
+            ESP_LOGE(IMU_TAG, "create imu_log task failed");
+        }
+    } else {
+        ESP_LOGE(IMU_TAG, "init failed: %s", esp_err_to_name(ret));
+    }
 
     ret = nimble_port_init();
     if (ret != ESP_OK) {
