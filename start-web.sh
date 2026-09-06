@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-WEB_DIR="$ROOT/hello_world/web"
+WEB_DIR="$ROOT/web"
 
 if [[ ! -f "$WEB_DIR/serve.py" ]]; then
   echo "找不到 $WEB_DIR/serve.py" >&2

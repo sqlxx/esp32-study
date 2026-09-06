@@ -194,6 +194,26 @@
       color: var(--muted);
       font-size: 0.78rem;
     }
+    .tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 14px;
+      padding: 4px;
+      background: #111826;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    .tab {
+      flex: 1;
+      background: transparent;
+      color: var(--muted);
+    }
+    .tab[aria-selected="true"] {
+      background: var(--accent);
+      color: #041018;
+    }
+    .panel { display: none; }
+    .panel.is-on { display: block; }
     @media (max-width: 640px) {
       #view { height: 280px; }
       .imu-grid { grid-template-columns: 1fr; }
@@ -204,21 +224,32 @@
   <main>
     <h1>ESP32 IMU / 舵机</h1>
     <p class="sub">
-      Chrome 连接 <code>ESP32-Hello</code>。连接后请先放平静止约 1.5 秒校准陀螺零偏；
-      静止时冻结偏航，运动后再放下也会稳住。无磁力计，转圈后的绝对朝向仍可能慢慢偏。
+      Chrome 连接 <code>ESP32-Hello</code>。BLE Service <code>0xFFE0</code>：
+      舵机 <code>0xFFE1</code>，IMU Notify <code>0xFFE2</code>。
     </p>
 
     <section class="card">
       <div class="row">
         <button id="btnConnect">连接设备</button>
         <button id="btnDisconnect" class="secondary" disabled>断开</button>
-        <button id="btnCalib" class="secondary" disabled>校准零偏</button>
-        <button id="btnResetYaw" class="secondary" disabled>复位偏航</button>
       </div>
       <div class="status" id="status">未连接</div>
     </section>
 
+    <div class="tabs" role="tablist">
+      <button class="tab" type="button" role="tab" id="tabImu" data-tab="imu" aria-selected="true">IMU</button>
+      <button class="tab" type="button" role="tab" id="tabServo" data-tab="servo" aria-selected="false">舵机</button>
+    </div>
+
+    <div id="panelImu" class="panel is-on" role="tabpanel" aria-labelledby="tabImu">
     <section class="card">
+      <div class="row">
+        <button id="btnCalib" class="secondary" disabled>校准零偏</button>
+        <button id="btnResetYaw" class="secondary" disabled>复位偏航</button>
+      </div>
+      <p class="sub" style="margin-bottom: 12px;">
+        连接后请先放平静止约 1.5 秒校准陀螺零偏；静止时冻结偏航。无磁力计，转圈后朝向仍可能慢慢偏。
+      </p>
       <div class="label">BMI088 姿态（红 X / 绿 Y / 蓝 Z）</div>
       <div class="view-wrap">
         <canvas id="view"></canvas>
@@ -250,7 +281,13 @@ Y +000.0</div>
         </div>
       </div>
     </section>
+    <section class="card tips">
+      电脑 Chrome：<code>web/</code> 下 <code>python3 -m http.server 8080</code>，打开
+      <code>http://localhost:8080</code>。Android 用 <code>python3 serve.py</code> 的 HTTPS。不支持 iPhone Safari。
+    </section>
+    </div>
 
+    <div id="panelServo" class="panel" role="tabpanel" aria-labelledby="tabServo">
     <section class="card">
       <div class="label">舵机角度（SG90 / GPIO18）</div>
       <div class="servo-row">
@@ -287,14 +324,10 @@ Y +000.0</div>
     </section>
 
     <section class="card tips">
-      <strong style="color: var(--text);">怎么打开</strong><br />
-      1. 电脑 Chrome：在 <code>web/</code> 执行 <code>python3 -m http.server 8080</code>，
-      打开 <code>http://localhost:8080</code><br />
-      2. Android Chrome：执行 <code>python3 serve.py</code>，手机访问提示的 HTTPS 地址<br />
-      3. 不支持 iPhone Safari<br /><br />
-      <strong style="color: var(--text);">BLE</strong>
-      Service <code>0xFFE0</code> / 舵机 <code>0xFFE1</code> / IMU Notify <code>0xFFE2</code>
+      Write 命令：角度 <code>0~180</code>、<code>scan</code>、<code>stop</code>、<code>spd:1~10</code>。
+      橙/黄信号 → GPIO18，红 → 外部 5V，棕/黑 → GND（与 ESP32 共地）。
     </section>
+    </div>
   </main>
 
   <script type="importmap">
@@ -433,12 +466,30 @@ Y +000.0</div>
     function resizeRenderer() {
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
+      if (w < 2 || h < 2) {
+        return;
+      }
       if (canvas.width !== w || canvas.height !== h) {
         renderer.setSize(w, h, false);
         camera.aspect = w / Math.max(h, 1);
         camera.updateProjectionMatrix();
       }
     }
+
+    function showTab(name) {
+      document.querySelectorAll(".tab").forEach((btn) => {
+        btn.setAttribute("aria-selected", btn.dataset.tab === name ? "true" : "false");
+      });
+      document.getElementById("panelImu").classList.toggle("is-on", name === "imu");
+      document.getElementById("panelServo").classList.toggle("is-on", name === "servo");
+      if (name === "imu") {
+        requestAnimationFrame(resizeRenderer);
+      }
+    }
+
+    document.querySelectorAll(".tab").forEach((btn) => {
+      btn.addEventListener("click", () => showTab(btn.dataset.tab));
+    });
 
     function applyAttitude() {
       euler.set(roll, pitch, yaw, "ZYX");
