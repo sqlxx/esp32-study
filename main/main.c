@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include "bldc.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "nimble/nimble_port.h"
@@ -100,6 +101,7 @@ static void start_advertising(void)
     printf("可用 nRF Connect，或打开 web/index.html（Chrome + Web Bluetooth）\n");
     printf("0xFFE1: Write 角度 / scan / stop / spd:1~10\n");
     printf("0xFFE2: Notify IMU acc[g] + gyro[dps]\n");
+    printf("0xFFE3: Write on/off/rpm:30 ，Notify 三相占空比\n");
 }
 
 static int gap_event_handler(struct ble_gap_event *event, void *arg)
@@ -213,6 +215,18 @@ static void imu_log_task(void *arg)
     }
 }
 
+static void bldc_notify_task(void *arg)
+{
+    (void)arg;
+    bldc_status_t st;
+
+    while (true) {
+        bldc_get_status(&st);
+        gatt_svr_notify_bldc(&st);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 void app_main(void)
 {
     int rc;
@@ -226,18 +240,31 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    ESP_ERROR_CHECK(servo_init());
+    // 舵机初始化，暂时不使用
+    // ESP_ERROR_CHECK(servo_init());
 
-    ret = bmi088_init();
-    if (ret == ESP_OK) {
-        BaseType_t ok = xTaskCreate(imu_log_task, "imu_log", 3072, NULL, 4, NULL);
-        if (ok != pdPASS) {
-            ESP_LOGE(IMU_TAG, "create imu_log task failed");
-        }
-    } else {
-        ESP_LOGE(IMU_TAG, "init failed: %s", esp_err_to_name(ret));
+    // IMU初始化 暂时不使用
+    // ret = bmi088_init();
+    // if (ret == ESP_OK) {
+    //     BaseType_t ok = xTaskCreate(imu_log_task, "imu_log", 3072, NULL, 4, NULL);
+    //     if (ok != pdPASS) {
+    //         ESP_LOGE(IMU_TAG, "create imu_log task failed");
+    //     }
+    // } else {
+    //     ESP_LOGE(IMU_TAG, "init failed: %s", esp_err_to_name(ret));
+    // }
+
+    ret = bldc_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "BLDC 初始化失败: %s", esp_err_to_name(ret));
+        return;
+    }
+    if (xTaskCreate(bldc_notify_task, "bldc_n", 2048, NULL, 4, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "create bldc notify task failed");
     }
 
+    // 初始化NimBLE（INFO 会每条 notify 打一遍 GATT procedure）
+    esp_log_level_set("NimBLE", ESP_LOG_WARN);
     ret = nimble_port_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "NimBLE 初始化失败: %s", esp_err_to_name(ret));

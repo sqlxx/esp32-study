@@ -11,7 +11,7 @@ static const char *TAG = "bldc_pwm";
 #define BLDC_PIN_U                 25
 #define BLDC_PIN_V                 26
 #define BLDC_PIN_W                 32
-#define BLDC_PIN_EN                (-1) /* 驱动 EN，没有则保持 -1 */
+#define BLDC_PIN_EN                33 /* 驱动 EN，没有则保持 -1 */
 #define BLDC_PWM_RESOLUTION_HZ     10000000
 #define BLDC_PWM_PERIOD_TICKS      500 /* 20kHz */
 #define BLDC_PHASE_COUNT           3

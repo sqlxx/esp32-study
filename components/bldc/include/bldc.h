@@ -18,7 +18,7 @@ void bldc_disable(void);
 
 bool bldc_is_enabled(void);
 
-/** 开环机械转速，单位 rpm；负值为反转。建议先从 ±30 试起。 */
+/** 开环机械转速，单位 rpm；负值为反转。建议先从 ±30 试起，上限 ±300。 */
 esp_err_t bldc_set_openloop_rpm(float rpm);
 
 float bldc_get_openloop_rpm(void);
@@ -30,6 +30,18 @@ float bldc_get_openloop_rpm(void);
 esp_err_t bldc_set_modulation(float modulation);
 
 float bldc_get_modulation(void);
+
+typedef struct {
+    bool enabled;
+    float rpm;
+    float modulation;
+    float theta_rad;
+    float u;
+    float v;
+    float w;
+} bldc_status_t;
+
+void bldc_get_status(bldc_status_t *out);
 
 #ifdef __cplusplus
 }

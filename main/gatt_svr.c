@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bldc.h"
 #include "bmi088.h"
 #include "esp_mac.h"
 #include "esp_system.h"
@@ -27,13 +28,22 @@ static const ble_uuid16_t chr_uuid =
 static const ble_uuid16_t imu_chr_uuid =
     BLE_UUID16_INIT(0xFFE2);
 
+/* 无刷：0000ffe3-0000-1000-8000-00805f9b34fb */
+static const ble_uuid16_t bldc_chr_uuid =
+    BLE_UUID16_INIT(0xFFE3);
+
 #define IMU_PAYLOAD_LEN 12
+#define BLDC_PAYLOAD_LEN 14
 
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_imu_val_handle;
+static uint16_t s_bldc_val_handle;
 static bool s_imu_notify;
+static bool s_bldc_notify;
 static uint8_t s_imu_last[IMU_PAYLOAD_LEN];
 static uint16_t s_imu_last_len;
+static uint8_t s_bldc_last[BLDC_PAYLOAD_LEN];
+static uint16_t s_bldc_last_len;
 
 /* 最近一次 Write 的内容（最多 20 字节） */
 #define WRITE_BUF_SIZE 20
@@ -44,6 +54,8 @@ static int chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                          struct ble_gatt_access_ctxt *ctxt, void *arg);
 static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                              struct ble_gatt_access_ctxt *ctxt, void *arg);
+static int bldc_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                              struct ble_gatt_access_ctxt *ctxt, void *arg);
 
 static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     {
@@ -64,6 +76,15 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
             },
             {
+                .uuid = &bldc_chr_uuid.u,
+                .access_cb = bldc_chr_access_cb,
+                .val_handle = &s_bldc_val_handle,
+                .flags = BLE_GATT_CHR_F_READ |
+                         BLE_GATT_CHR_F_WRITE |
+                         BLE_GATT_CHR_F_WRITE_NO_RSP |
+                         BLE_GATT_CHR_F_NOTIFY,
+            },
+            {
                 0,
             },
         },
@@ -82,6 +103,92 @@ static int16_t clamp_i16(long v)
         return (int16_t)-32768;
     }
     return (int16_t)v;
+}
+
+static uint16_t clamp_u16_frac(float v, float scale)
+{
+    long x = lroundf(v * scale);
+    if (x < 0) {
+        return 0;
+    }
+    if (x > 65535) {
+        return 65535;
+    }
+    return (uint16_t)x;
+}
+
+static void pack_bldc(uint8_t out[BLDC_PAYLOAD_LEN], const bldc_status_t *st)
+{
+    float deg = st->theta_rad * (180.0f / 3.14159265f);
+    if (deg < 0.0f) {
+        deg += 360.0f;
+    }
+    int16_t rpm_x10 = clamp_i16(lroundf(st->rpm * 10.0f));
+    uint16_t fields[5] = {
+        clamp_u16_frac(st->u, 1000.0f),
+        clamp_u16_frac(st->v, 1000.0f),
+        clamp_u16_frac(st->w, 1000.0f),
+        clamp_u16_frac(deg, 10.0f),
+        clamp_u16_frac(st->modulation, 1000.0f),
+    };
+    memcpy(out, &rpm_x10, 2);
+    out[2] = st->enabled ? 1 : 0;
+    out[3] = 0;
+    memcpy(out + 4, fields, 10);
+}
+
+static char *trim_cmd(char *cmd, uint16_t len)
+{
+    cmd[len] = '\0';
+    char *p = cmd;
+    while (*p && isspace((unsigned char)*p)) {
+        p++;
+    }
+    char *end_trim = p + strlen(p);
+    while (end_trim > p && isspace((unsigned char)end_trim[-1])) {
+        *--end_trim = '\0';
+    }
+    for (char *q = p; *q; q++) {
+        *q = (char)tolower((unsigned char)*q);
+    }
+    return p;
+}
+
+static int handle_bldc_cmd(const char *p)
+{
+    if (strcmp(p, "on") == 0 || strcmp(p, "start") == 0) {
+        return bldc_enable() == ESP_OK ? 0 : BLE_ATT_ERR_UNLIKELY;
+    }
+    if (strcmp(p, "off") == 0 || strcmp(p, "stop") == 0) {
+        bldc_disable();
+        return 0;
+    }
+
+    const char *num = NULL;
+    if (strncmp(p, "rpm:", 4) == 0) {
+        num = p + 4;
+    } else if (strncmp(p, "m:", 2) == 0) {
+        char *end = NULL;
+        float m = strtof(p + 2, &end);
+        if (end == p + 2 || (end && *end != '\0')) {
+            printf("BLDC: m 格式无效，示例 m:0.15\n");
+            return 0;
+        }
+        return bldc_set_modulation(m) == ESP_OK ? 0 : BLE_ATT_ERR_UNLIKELY;
+    } else if (*p == '\0' || (!isdigit((unsigned char)*p) && *p != '-' && *p != '+')) {
+        printf("BLDC: 未知命令（on/off/rpm:30/m:0.15）\n");
+        return 0;
+    } else {
+        num = p;
+    }
+
+    char *end = NULL;
+    float rpm = strtof(num, &end);
+    if (end == num || (end && *end != '\0')) {
+        printf("BLDC: rpm 格式无效\n");
+        return 0;
+    }
+    return bldc_set_openloop_rpm(rpm) == ESP_OK ? 0 : BLE_ATT_ERR_UNLIKELY;
 }
 
 static void pack_imu(uint8_t out[IMU_PAYLOAD_LEN], const bmi088_vec3_t *acc, const bmi088_vec3_t *gyr)
@@ -123,6 +230,9 @@ static int build_device_info(char *buf, size_t buflen)
 
     esp_read_mac(mac, ESP_MAC_BT);
 
+    bldc_status_t bldc;
+    bldc_get_status(&bldc);
+
     return snprintf(buf, buflen,
                     "name=%s\n"
                     "mac=%02x:%02x:%02x:%02x:%02x:%02x\n"
@@ -132,7 +242,9 @@ static int build_device_info(char *buf, size_t buflen)
                     "rst=%s\n"
                     "servo=%d\n"
                     "scan=%d\n"
-                    "spd=%d",
+                    "spd=%d\n"
+                    "bldc=%d\n"
+                    "rpm=%.0f",
                     name ? name : "?",
                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
                     (unsigned long)uptime_s,
@@ -141,7 +253,9 @@ static int build_device_info(char *buf, size_t buflen)
                     reset_reason_str(esp_reset_reason()),
                     servo_get_angle(),
                     servo_is_scanning() ? 1 : 0,
-                    servo_get_scan_speed());
+                    servo_get_scan_speed(),
+                    bldc.enabled ? 1 : 0,
+                    (double)bldc.rpm);
 }
 
 static int chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
@@ -151,7 +265,7 @@ static int chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
 
     switch (ctxt->op) {
     case BLE_GATT_ACCESS_OP_READ_CHR: {
-        char info[200];
+        char info[256];
         int len = build_device_info(info, sizeof(info));
         if (len < 0) {
             return BLE_ATT_ERR_UNLIKELY;
@@ -291,16 +405,77 @@ void gatt_svr_on_disconnect(void)
 {
     s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
     s_imu_notify = false;
+    s_bldc_notify = false;
 }
 
 void gatt_svr_on_subscribe(uint16_t attr_handle, uint16_t conn_handle, bool notify_enabled)
 {
-    if (attr_handle != s_imu_val_handle) {
+    if (attr_handle == s_imu_val_handle) {
+        s_conn_handle = conn_handle;
+        s_imu_notify = notify_enabled;
+        printf("IMU notify %s, conn=%u\n", notify_enabled ? "on" : "off", conn_handle);
         return;
     }
-    s_conn_handle = conn_handle;
-    s_imu_notify = notify_enabled;
-    printf("IMU notify %s, conn=%u\n", notify_enabled ? "on" : "off", conn_handle);
+    if (attr_handle == s_bldc_val_handle) {
+        s_conn_handle = conn_handle;
+        s_bldc_notify = notify_enabled;
+        printf("BLDC notify %s, conn=%u\n", notify_enabled ? "on" : "off", conn_handle);
+    }
+}
+
+void gatt_svr_notify_bldc(const bldc_status_t *st)
+{
+    if (!s_bldc_notify || s_conn_handle == BLE_HS_CONN_HANDLE_NONE || st == NULL) {
+        return;
+    }
+
+    pack_bldc(s_bldc_last, st);
+    s_bldc_last_len = BLDC_PAYLOAD_LEN;
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(s_bldc_last, BLDC_PAYLOAD_LEN);
+    if (om == NULL) {
+        return;
+    }
+
+    (void)ble_gatts_notify_custom(s_conn_handle, s_bldc_val_handle, om);
+}
+
+static int bldc_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                              struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+
+    switch (ctxt->op) {
+    case BLE_GATT_ACCESS_OP_READ_CHR: {
+        uint8_t zeros[BLDC_PAYLOAD_LEN] = {0};
+        if (s_bldc_last_len == 0) {
+            bldc_status_t st;
+            bldc_get_status(&st);
+            pack_bldc(s_bldc_last, &st);
+            s_bldc_last_len = BLDC_PAYLOAD_LEN;
+        }
+        const uint8_t *data = s_bldc_last_len ? s_bldc_last : zeros;
+        int rc = os_mbuf_append(ctxt->om, data, BLDC_PAYLOAD_LEN);
+        return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    case BLE_GATT_ACCESS_OP_WRITE_CHR: {
+        uint16_t om_len = OS_MBUF_PKTLEN(ctxt->om);
+        if (om_len == 0 || om_len > WRITE_BUF_SIZE) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        int rc = ble_hs_mbuf_to_flat(ctxt->om, write_buf, WRITE_BUF_SIZE, &write_len);
+        if (rc != 0) {
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        char cmd[WRITE_BUF_SIZE + 1];
+        memcpy(cmd, write_buf, write_len);
+        return handle_bldc_cmd(trim_cmd(cmd, write_len));
+    }
+    default:
+        return BLE_ATT_ERR_UNLIKELY;
+    }
 }
 
 void gatt_svr_notify_imu(const bmi088_vec3_t *acc, const bmi088_vec3_t *gyr)

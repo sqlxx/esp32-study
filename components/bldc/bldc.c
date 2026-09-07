@@ -15,11 +15,24 @@ static const char *TAG = "bldc";
 #define BLDC_TWO_PI              6.283185307179586f
 #define BLDC_ONE_TWENTY_RAD      2.0943951023931953f
 
+#define BLDC_RPM_MAX 300.0f
+
 static volatile bool s_enabled;
 static volatile float s_rpm;
 static volatile float s_modulation = BLDC_MODULATION_DEFAULT;
-static float s_theta;
+static volatile float s_theta;
+static volatile float s_u;
+static volatile float s_v;
+static volatile float s_w;
 static TaskHandle_t s_task;
+
+static void store_duty(float u, float v, float w)
+{
+    s_u = u;
+    s_v = v;
+    s_w = w;
+    (void)bldc_pwm_set_duty(u, v, w);
+}
 
 static void openloop_task(void *arg)
 {
@@ -41,7 +54,7 @@ static void openloop_task(void *arg)
         const float rpm = s_rpm;
         const float m = s_modulation;
         if (rpm == 0.0f || m <= 0.0f) {
-            bldc_pwm_set_duty(0.5f, 0.5f, 0.5f);
+            store_duty(0.5f, 0.5f, 0.5f);
             vTaskDelayUntil(&last, period);
             continue;
         }
@@ -54,10 +67,9 @@ static void openloop_task(void *arg)
             s_theta += BLDC_TWO_PI;
         }
 
-        const float u = 0.5f + 0.5f * m * sinf(s_theta);
-        const float v = 0.5f + 0.5f * m * sinf(s_theta - BLDC_ONE_TWENTY_RAD);
-        const float w = 0.5f + 0.5f * m * sinf(s_theta + BLDC_ONE_TWENTY_RAD);
-        bldc_pwm_set_duty(u, v, w);
+        store_duty(0.5f + 0.5f * m * sinf(s_theta),
+                   0.5f + 0.5f * m * sinf(s_theta - BLDC_ONE_TWENTY_RAD),
+                   0.5f + 0.5f * m * sinf(s_theta + BLDC_ONE_TWENTY_RAD));
 
         vTaskDelayUntil(&last, period);
     }
@@ -74,10 +86,7 @@ esp_err_t bldc_init(void)
         return err;
     }
 
-    err = bldc_pwm_set_duty(0.0f, 0.0f, 0.0f);
-    if (err != ESP_OK) {
-        return err;
-    }
+    store_duty(0.0f, 0.0f, 0.0f);
 
     BaseType_t ok = xTaskCreate(openloop_task, "bldc_ol", 2048, NULL, 6, &s_task);
     if (ok != pdPASS) {
@@ -110,7 +119,7 @@ void bldc_disable(void)
 {
     s_enabled = false;
     (void)bldc_pwm_set_enable(false);
-    (void)bldc_pwm_set_duty(0.0f, 0.0f, 0.0f);
+    store_duty(0.0f, 0.0f, 0.0f);
     ESP_LOGI(TAG, "disabled");
 }
 
@@ -121,6 +130,11 @@ bool bldc_is_enabled(void)
 
 esp_err_t bldc_set_openloop_rpm(float rpm)
 {
+    if (rpm > BLDC_RPM_MAX) {
+        rpm = BLDC_RPM_MAX;
+    } else if (rpm < -BLDC_RPM_MAX) {
+        rpm = -BLDC_RPM_MAX;
+    }
     s_rpm = rpm;
     ESP_LOGI(TAG, "rpm -> %.1f", (double)s_rpm);
     return ESP_OK;
@@ -146,4 +160,18 @@ esp_err_t bldc_set_modulation(float modulation)
 float bldc_get_modulation(void)
 {
     return s_modulation;
+}
+
+void bldc_get_status(bldc_status_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    out->enabled = s_enabled;
+    out->rpm = s_rpm;
+    out->modulation = s_modulation;
+    out->theta_rad = s_theta;
+    out->u = s_u;
+    out->v = s_v;
+    out->w = s_w;
 }

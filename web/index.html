@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ESP32 IMU / 舵机</title>
+  <title>ESP32 IMU / 舵机 / 无刷</title>
   <style>
     :root {
       --bg: #0f1419;
@@ -214,18 +214,71 @@
     }
     .panel { display: none; }
     .panel.is-on { display: block; }
+    .phase-row {
+      display: grid;
+      grid-template-columns: 1.4em 1fr 4.6em;
+      align-items: center;
+      gap: 10px;
+      margin: 8px 0;
+    }
+    .phase-row .k { font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .phase-row .u { color: #ff6b6b; }
+    .phase-row .v { color: #3ecf8e; }
+    .phase-row .w { color: #3d9cfd; }
+    .phase-bar {
+      height: 14px;
+      border-radius: 7px;
+      background: #111826;
+      border: 1px solid var(--line);
+      overflow: hidden;
+    }
+    .phase-bar > i {
+      display: block;
+      height: 100%;
+      width: 0%;
+      border-radius: 7px;
+    }
+    .phase-bar .u { background: #ff6b6b; }
+    .phase-bar .v { background: #3ecf8e; }
+    .phase-bar .w { background: #3d9cfd; }
+    .phase-row .n {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.88rem;
+    }
+    .bldc-meta {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-top: 12px;
+    }
+    #phaseView, #vecView {
+      width: 100%;
+      height: 240px;
+      display: block;
+      border-radius: 10px;
+      background: #0b111a;
+    }
+    .bldc-plots {
+      display: grid;
+      grid-template-columns: 1.35fr 1fr;
+      gap: 12px;
+    }
     @media (max-width: 640px) {
       #view { height: 280px; }
       .imu-grid { grid-template-columns: 1fr; }
+      .bldc-plots { grid-template-columns: 1fr; }
+      .bldc-meta { grid-template-columns: 1fr 1fr; }
     }
   </style>
 </head>
 <body>
   <main>
-    <h1>ESP32 IMU / 舵机</h1>
+    <h1>ESP32 IMU / 舵机 / 无刷</h1>
     <p class="sub">
       Chrome 连接 <code>ESP32-Hello</code>。BLE Service <code>0xFFE0</code>：
-      舵机 <code>0xFFE1</code>，IMU Notify <code>0xFFE2</code>。
+      舵机 <code>0xFFE1</code>，IMU <code>0xFFE2</code>，无刷 <code>0xFFE3</code>。
     </p>
 
     <section class="card">
@@ -239,6 +292,7 @@
     <div class="tabs" role="tablist">
       <button class="tab" type="button" role="tab" id="tabImu" data-tab="imu" aria-selected="true">IMU</button>
       <button class="tab" type="button" role="tab" id="tabServo" data-tab="servo" aria-selected="false">舵机</button>
+      <button class="tab" type="button" role="tab" id="tabBldc" data-tab="bldc" aria-selected="false">无刷</button>
     </div>
 
     <div id="panelImu" class="panel is-on" role="tabpanel" aria-labelledby="tabImu">
@@ -328,6 +382,74 @@ Y +000.0</div>
       橙/黄信号 → GPIO18，红 → 外部 5V，棕/黑 → GND（与 ESP32 共地）。
     </section>
     </div>
+
+    <div id="panelBldc" class="panel" role="tabpanel" aria-labelledby="tabBldc">
+    <section class="card">
+      <div class="row">
+        <button id="btnBldcOn" disabled>启动</button>
+        <button id="btnBldcOff" class="secondary" disabled>停止</button>
+        <span class="imu-flag" id="bldcRunState">未启动</span>
+      </div>
+      <div class="label">开环转速（建议 ±300 rpm，负值为反转）</div>
+      <div class="servo-row">
+        <input id="rpmSlider" type="range" min="-300" max="300" value="30" disabled />
+        <span class="angle" id="rpmLabel">30</span>
+      </div>
+      <div class="label" style="margin-top: 14px;">调制度 m（0.05~0.50）</div>
+      <div class="servo-row">
+        <input id="modSlider" type="range" min="5" max="50" value="15" disabled />
+        <span class="angle" id="modLabel">0.15</span>
+      </div>
+    </section>
+    <section class="card">
+      <div class="bldc-plots">
+      <div>
+      <div class="label">三相占空比曲线（红 U / 绿 V / 蓝 W，中线 50%）</div>
+      <div class="view-wrap">
+        <canvas id="phaseView"></canvas>
+        <div class="axis-legend">
+          <span class="x" id="valU">U 0.000</span>
+          <span class="y" id="valV">V 0.000</span>
+          <span class="z" id="valW">W 0.000</span>
+        </div>
+      </div>
+      </div>
+      <div>
+      <div class="label">合成矢量（αβ 平面，开环电压）</div>
+      <div class="view-wrap">
+        <canvas id="vecView"></canvas>
+        <div class="axis-legend">
+          <span class="x">U</span>
+          <span class="y">V</span>
+          <span class="z">W</span>
+        </div>
+      </div>
+      </div>
+      </div>
+      <div class="bldc-meta imu-grid">
+        <div class="imu-cell">
+          <div class="k">电角度</div>
+          <div class="v" id="bldcTheta">+000.0°</div>
+        </div>
+        <div class="imu-cell">
+          <div class="k">目标转速</div>
+          <div class="v" id="bldcRpm">+000.0</div>
+        </div>
+        <div class="imu-cell">
+          <div class="k">调制度</div>
+          <div class="v" id="bldcMod">0.150</div>
+        </div>
+        <div class="imu-cell">
+          <div class="k">合成 |V|</div>
+          <div class="v" id="bldcVec">0.000</div>
+        </div>
+      </div>
+    </section>
+    <section class="card tips">
+      特征 <code>0xFFE3</code>：Write <code>on</code> / <code>off</code> / <code>rpm:30</code> / <code>m:0.15</code>。
+      U/V/W → GPIO25/26/32。 电机电源不要走 USB，与 ESP32 共地。先小转速、小 m，确认转向再往上加。
+    </section>
+    </div>
   </main>
 
   <script type="importmap">
@@ -345,6 +467,7 @@ Y +000.0</div>
     const SERVICE_UUID = 0xFFE0;
     const CHAR_UUID = 0xFFE1;
     const IMU_UUID = 0xFFE2;
+    const BLDC_UUID = 0xFFE3;
     const DEG = Math.PI / 180;
     const ALPHA = 0.98;
     const CALIB_MS = 1500;
@@ -375,11 +498,35 @@ Y +000.0</div>
     const rpyOut = document.getElementById("rpyOut");
     const imuState = document.getElementById("imuState");
     const canvas = document.getElementById("view");
+    const btnBldcOn = document.getElementById("btnBldcOn");
+    const btnBldcOff = document.getElementById("btnBldcOff");
+    const bldcRunState = document.getElementById("bldcRunState");
+    const rpmSlider = document.getElementById("rpmSlider");
+    const rpmLabel = document.getElementById("rpmLabel");
+    const BLDC_RPM_MAX = 300;
+    rpmSlider.min = String(-BLDC_RPM_MAX);
+    rpmSlider.max = String(BLDC_RPM_MAX);
+    const clampBldcRpm = (rpm) => Math.max(-BLDC_RPM_MAX, Math.min(BLDC_RPM_MAX, rpm));
+    const sliderRpm = () => Math.round(clampBldcRpm(Number(rpmSlider.value)));
+    const modSlider = document.getElementById("modSlider");
+    const modLabel = document.getElementById("modLabel");
+    const phaseCanvas = document.getElementById("phaseView");
+    const phaseCtx = phaseCanvas.getContext("2d");
+    const vecCanvas = document.getElementById("vecView");
+    const vecCtx = vecCanvas.getContext("2d");
+    const valU = document.getElementById("valU");
+    const valV = document.getElementById("valV");
+    const valW = document.getElementById("valW");
+    const bldcTheta = document.getElementById("bldcTheta");
+    const bldcRpm = document.getElementById("bldcRpm");
+    const bldcMod = document.getElementById("bldcMod");
+    const bldcVec = document.getElementById("bldcVec");
 
     let device = null;
     let server = null;
     let characteristic = null;
     let imuChar = null;
+    let bldcChar = null;
     let writeBusy = false;
     let pendingAngle = null;
     let lastWriteAt = 0;
@@ -395,6 +542,17 @@ Y +000.0</div>
     let calibrating = false;
     let calibBuf = [];
     let lastCalibHint = 0;
+
+    const PHASE_LEN = 240;
+    const phaseHist = {
+      u: new Float32Array(PHASE_LEN),
+      v: new Float32Array(PHASE_LEN),
+      w: new Float32Array(PHASE_LEN),
+      a: new Float32Array(PHASE_LEN),
+      b: new Float32Array(PHASE_LEN),
+    };
+    let phaseHead = 0;
+    let phaseCount = 0;
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -482,8 +640,15 @@ Y +000.0</div>
       });
       document.getElementById("panelImu").classList.toggle("is-on", name === "imu");
       document.getElementById("panelServo").classList.toggle("is-on", name === "servo");
+      document.getElementById("panelBldc").classList.toggle("is-on", name === "bldc");
       if (name === "imu") {
         requestAnimationFrame(resizeRenderer);
+      }
+      if (name === "bldc") {
+        requestAnimationFrame(() => {
+          drawPhaseView();
+          drawVecView();
+        });
       }
     }
 
@@ -689,15 +854,26 @@ Y +000.0</div>
       btnScan.disabled = !connected;
     }
 
+    function setBldcUi(connected) {
+      btnBldcOn.disabled = !connected;
+      btnBldcOff.disabled = !connected;
+      rpmSlider.disabled = !connected;
+      modSlider.disabled = !connected;
+    }
+
     function setConnected(connected) {
       btnConnect.disabled = connected;
       btnDisconnect.disabled = !connected;
+      setBldcUi(connected);
       btnCalib.disabled = !connected;
       btnResetYaw.disabled = !connected;
       btnRead.disabled = !connected;
       btnWrite.disabled = !connected;
       writeInput.disabled = !connected;
       if (!connected) {
+        resetPhaseHist();
+        drawPhaseView();
+        drawVecView();
         stopScanPoll();
         setScanUi(false);
         angleSlider.disabled = true;
@@ -719,15 +895,269 @@ Y +000.0</div>
       return new TextDecoder("utf-8").decode(value);
     }
 
-    async function bleWriteText(text) {
+    async function bleWriteTo(char, text) {
       const data = new TextEncoder().encode(text);
-      if (characteristic.properties.writeWithoutResponse) {
-        await characteristic.writeValueWithoutResponse(data);
+      if (char.properties.writeWithoutResponse) {
+        await char.writeValueWithoutResponse(data);
       } else {
-        await characteristic.writeValue(data);
+        await char.writeValue(data);
       }
+    }
+
+    async function bleWriteText(text) {
+      await bleWriteTo(characteristic, text);
       lastWriteAt = Date.now();
       writeInput.value = text;
+    }
+
+    function resetPhaseHist() {
+      phaseHead = 0;
+      phaseCount = 0;
+      phaseHist.u.fill(0);
+      phaseHist.v.fill(0);
+      phaseHist.w.fill(0);
+      phaseHist.a.fill(0);
+      phaseHist.b.fill(0);
+    }
+
+    function clarke(u, v, w) {
+      const ua = u - 0.5;
+      const ub = v - 0.5;
+      const uc = w - 0.5;
+      return {
+        a: (2 / 3) * (ua - 0.5 * ub - 0.5 * uc),
+        b: (1 / Math.sqrt(3)) * (ub - uc),
+      };
+    }
+
+    function pushPhase(u, v, w) {
+      const ab = clarke(u, v, w);
+      phaseHist.u[phaseHead] = u;
+      phaseHist.v[phaseHead] = v;
+      phaseHist.w[phaseHead] = w;
+      phaseHist.a[phaseHead] = ab.a;
+      phaseHist.b[phaseHead] = ab.b;
+      phaseHead = (phaseHead + 1) % PHASE_LEN;
+      if (phaseCount < PHASE_LEN) {
+        phaseCount += 1;
+      }
+    }
+
+    function resizePhaseView() {
+      const w = phaseCanvas.clientWidth;
+      const h = phaseCanvas.clientHeight;
+      if (w < 2 || h < 2) {
+        return false;
+      }
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const pw = Math.round(w * dpr);
+      const ph = Math.round(h * dpr);
+      if (phaseCanvas.width !== pw || phaseCanvas.height !== ph) {
+        phaseCanvas.width = pw;
+        phaseCanvas.height = ph;
+      }
+      return true;
+    }
+
+    function drawPhaseLine(arr, color, width, height, pad) {
+      if (phaseCount < 2) {
+        return;
+      }
+      const innerW = width - pad * 2;
+      const innerH = height - pad * 2;
+      phaseCtx.beginPath();
+      for (let i = 0; i < phaseCount; i++) {
+        const idx = (phaseHead - phaseCount + i + PHASE_LEN) % PHASE_LEN;
+        const x = pad + (innerW * i) / Math.max(phaseCount - 1, 1);
+        const y = pad + innerH * (1 - arr[idx]);
+        if (i === 0) {
+          phaseCtx.moveTo(x, y);
+        } else {
+          phaseCtx.lineTo(x, y);
+        }
+      }
+      phaseCtx.strokeStyle = color;
+      phaseCtx.lineWidth = 2;
+      phaseCtx.stroke();
+    }
+
+    function drawPhaseView() {
+      if (!resizePhaseView()) {
+        return;
+      }
+      const width = phaseCanvas.width;
+      const height = phaseCanvas.height;
+      const pad = 12;
+      const innerW = width - pad * 2;
+      const innerH = height - pad * 2;
+
+      phaseCtx.fillStyle = "#0b111a";
+      phaseCtx.fillRect(0, 0, width, height);
+
+      phaseCtx.strokeStyle = "#223044";
+      phaseCtx.lineWidth = 1;
+      [0, 0.25, 0.5, 0.75, 1].forEach((level) => {
+        const y = pad + innerH * (1 - level);
+        phaseCtx.beginPath();
+        phaseCtx.moveTo(pad, y);
+        phaseCtx.lineTo(pad + innerW, y);
+        phaseCtx.stroke();
+      });
+      phaseCtx.strokeStyle = "#3d4d66";
+      phaseCtx.beginPath();
+      phaseCtx.moveTo(pad, pad + innerH * 0.5);
+      phaseCtx.lineTo(pad + innerW, pad + innerH * 0.5);
+      phaseCtx.stroke();
+
+      drawPhaseLine(phaseHist.u, "#ff6b6b", width, height, pad);
+      drawPhaseLine(phaseHist.v, "#3ecf8e", width, height, pad);
+      drawPhaseLine(phaseHist.w, "#3d9cfd", width, height, pad);
+    }
+
+    function resizeVecView() {
+      const w = vecCanvas.clientWidth;
+      const h = vecCanvas.clientHeight;
+      if (w < 2 || h < 2) {
+        return false;
+      }
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const pw = Math.round(w * dpr);
+      const ph = Math.round(h * dpr);
+      if (vecCanvas.width !== pw || vecCanvas.height !== ph) {
+        vecCanvas.width = pw;
+        vecCanvas.height = ph;
+      }
+      return true;
+    }
+
+    function drawVecAxis(cx, cy, scale, angle, color, label) {
+      const x = cx + Math.cos(angle) * scale * 0.55;
+      const y = cy - Math.sin(angle) * scale * 0.55;
+      vecCtx.strokeStyle = color;
+      vecCtx.lineWidth = 1.2;
+      vecCtx.setLineDash([4, 4]);
+      vecCtx.beginPath();
+      vecCtx.moveTo(cx, cy);
+      vecCtx.lineTo(x, y);
+      vecCtx.stroke();
+      vecCtx.setLineDash([]);
+      vecCtx.fillStyle = color;
+      vecCtx.font = "600 12px ui-sans-serif, sans-serif";
+      vecCtx.fillText(label, x + 4, y + 4);
+    }
+
+    function drawVecView() {
+      if (!resizeVecView()) {
+        return;
+      }
+      const width = vecCanvas.width;
+      const height = vecCanvas.height;
+      const cx = width / 2;
+      const cy = height / 2;
+      const scale = Math.min(width, height) * 0.42 / 0.55;
+
+      vecCtx.fillStyle = "#0b111a";
+      vecCtx.fillRect(0, 0, width, height);
+
+      vecCtx.strokeStyle = "#223044";
+      vecCtx.lineWidth = 1;
+      vecCtx.beginPath();
+      vecCtx.arc(cx, cy, 0.5 * scale, 0, Math.PI * 2);
+      vecCtx.stroke();
+
+      vecCtx.beginPath();
+      vecCtx.moveTo(cx - 0.55 * scale, cy);
+      vecCtx.lineTo(cx + 0.55 * scale, cy);
+      vecCtx.moveTo(cx, cy - 0.55 * scale);
+      vecCtx.lineTo(cx, cy + 0.55 * scale);
+      vecCtx.stroke();
+
+      drawVecAxis(cx, cy, scale, 0, "#ff6b6b", "U");
+      drawVecAxis(cx, cy, scale, (2 * Math.PI) / 3, "#3ecf8e", "V");
+      drawVecAxis(cx, cy, scale, -(2 * Math.PI) / 3, "#3d9cfd", "W");
+
+      if (phaseCount >= 2) {
+        vecCtx.beginPath();
+        for (let i = 0; i < phaseCount; i++) {
+          const idx = (phaseHead - phaseCount + i + PHASE_LEN) % PHASE_LEN;
+          const x = cx + phaseHist.a[idx] * scale;
+          const y = cy - phaseHist.b[idx] * scale;
+          if (i === 0) {
+            vecCtx.moveTo(x, y);
+          } else {
+            vecCtx.lineTo(x, y);
+          }
+        }
+        vecCtx.strokeStyle = "#8b9bb4";
+        vecCtx.lineWidth = 1.4;
+        vecCtx.stroke();
+      }
+
+      if (phaseCount >= 1) {
+        const last = (phaseHead - 1 + PHASE_LEN) % PHASE_LEN;
+        const vx = phaseHist.a[last];
+        const vy = phaseHist.b[last];
+        const x = cx + vx * scale;
+        const y = cy - vy * scale;
+        vecCtx.strokeStyle = "#e7ecf3";
+        vecCtx.lineWidth = 2;
+        vecCtx.beginPath();
+        vecCtx.moveTo(cx, cy);
+        vecCtx.lineTo(x, y);
+        vecCtx.stroke();
+        vecCtx.fillStyle = "#e7ecf3";
+        vecCtx.beginPath();
+        vecCtx.arc(x, y, 4, 0, Math.PI * 2);
+        vecCtx.fill();
+      }
+    }
+
+    function paintBldc(st) {
+      pushPhase(st.u, st.v, st.w);
+      drawPhaseView();
+      drawVecView();
+      const last = (phaseHead - 1 + PHASE_LEN) % PHASE_LEN;
+      bldcVec.textContent = Math.hypot(phaseHist.a[last], phaseHist.b[last]).toFixed(3);
+      valU.textContent = `U ${st.u.toFixed(3)}`;
+      valV.textContent = `V ${st.v.toFixed(3)}`;
+      valW.textContent = `W ${st.w.toFixed(3)}`;
+      bldcTheta.textContent = `${fmtFixed(st.theta, 3, 1)}°`;
+      bldcRpm.textContent = fmtFixed(st.rpm, 3, 1);
+      bldcMod.textContent = st.m.toFixed(3);
+      bldcRunState.textContent = st.enabled ? "运行中" : "已停止";
+      bldcRunState.style.color = st.enabled ? "var(--ok)" : "var(--muted)";
+      if (!rpmSlider.matches(":active")) {
+        const rpm = Math.round(clampBldcRpm(st.rpm));
+        rpmSlider.value = String(rpm);
+        rpmLabel.textContent = String(rpm);
+      }
+      if (!modSlider.matches(":active")) {
+        modSlider.value = String(Math.round(st.m * 100));
+        modLabel.textContent = st.m.toFixed(2);
+      }
+    }
+
+    function onBldcNotify(event) {
+      const v = event.target.value;
+      if (v.byteLength < 14) {
+        return;
+      }
+      paintBldc({
+        rpm: v.getInt16(0, true) / 10,
+        enabled: v.getUint8(2) !== 0,
+        u: v.getUint16(4, true) / 1000,
+        v: v.getUint16(6, true) / 1000,
+        w: v.getUint16(8, true) / 1000,
+        theta: v.getUint16(10, true) / 10,
+        m: v.getUint16(12, true) / 1000,
+      });
+    }
+
+    async function bleWriteBldc(text) {
+      if (!bldcChar) {
+        throw new Error("无刷特征未就绪");
+      }
+      await bleWriteTo(bldcChar, text);
     }
 
     async function writeAngle(angle) {
@@ -859,6 +1289,21 @@ Y +000.0</div>
       imuChar = null;
     }
 
+    async function stopBldcNotify() {
+      if (!bldcChar) {
+        return;
+      }
+      try {
+        bldcChar.removeEventListener("characteristicvaluechanged", onBldcNotify);
+        if (bldcChar.properties.notify) {
+          await bldcChar.stopNotifications();
+        }
+      } catch (_) {
+        /* ignore */
+      }
+      bldcChar = null;
+    }
+
     async function connect() {
       if (!navigator.bluetooth) {
         setStatus("当前浏览器不支持 Web Bluetooth（请用 Android / 桌面 Chrome）", false);
@@ -876,6 +1321,7 @@ Y +000.0</div>
           characteristic = null;
           server = null;
           imuChar = null;
+          bldcChar = null;
           stopScanPoll();
           setConnected(false);
           setStatus("已断开", false);
@@ -888,11 +1334,15 @@ Y +000.0</div>
         imuChar = await service.getCharacteristic(IMU_UUID);
         imuChar.addEventListener("characteristicvaluechanged", onImuNotify);
         await imuChar.startNotifications();
+        bldcChar = await service.getCharacteristic(BLDC_UUID);
+        bldcChar.addEventListener("characteristicvaluechanged", onBldcNotify);
+        await bldcChar.startNotifications();
 
         setConnected(true);
-        beginGyroCalib();
+        setStatus(`已连接 ${device.name || ""}`.trim(), true);
       } catch (err) {
         await stopImuNotify();
+        await stopBldcNotify();
         setStatus(`连接失败：${err.message}`, false);
         setConnected(false);
       }
@@ -904,6 +1354,7 @@ Y +000.0</div>
       }
       stopScanPoll();
       await stopImuNotify();
+      await stopBldcNotify();
       if (device && device.gatt.connected) {
         device.gatt.disconnect();
       }
@@ -982,6 +1433,67 @@ Y +000.0</div>
     btnCenter.addEventListener("click", () => applyAngle(90));
     btnAngle180.addEventListener("click", () => applyAngle(180));
     btnScan.addEventListener("click", () => sendScan(!scanRunning));
+
+    let rpmSendTimer = null;
+    rpmSlider.addEventListener("input", () => {
+      const rpm = sliderRpm();
+      rpmLabel.textContent = String(rpm);
+      clearTimeout(rpmSendTimer);
+      rpmSendTimer = setTimeout(async () => {
+        if (!bldcChar) {
+          return;
+        }
+        try {
+          await bleWriteBldc(`rpm:${rpm}`);
+          setStatus(`转速 ${rpm} rpm`, true);
+        } catch (err) {
+          setStatus(`设置转速失败：${err.message}`, false);
+        }
+      }, 120);
+    });
+
+    let modSendTimer = null;
+    modSlider.addEventListener("input", () => {
+      const m = (Number(modSlider.value) / 100).toFixed(2);
+      modLabel.textContent = m;
+      clearTimeout(modSendTimer);
+      modSendTimer = setTimeout(async () => {
+        if (!bldcChar) {
+          return;
+        }
+        try {
+          await bleWriteBldc(`m:${m}`);
+          setStatus(`调制度 ${m}`, true);
+        } catch (err) {
+          setStatus(`设置调制度失败：${err.message}`, false);
+        }
+      }, 120);
+    });
+
+    btnBldcOn.addEventListener("click", async () => {
+      if (!bldcChar) {
+        return;
+      }
+      try {
+        await bleWriteBldc(`rpm:${sliderRpm()}`);
+        await bleWriteBldc("on");
+        setStatus(`无刷已启动 ${sliderRpm()} rpm`, true);
+      } catch (err) {
+        setStatus(`启动失败：${err.message}`, false);
+      }
+    });
+
+    btnBldcOff.addEventListener("click", async () => {
+      if (!bldcChar) {
+        return;
+      }
+      try {
+        await bleWriteBldc("off");
+        setStatus("无刷已停止", true);
+      } catch (err) {
+        setStatus(`停止失败：${err.message}`, false);
+      }
+    });
 
     if (!window.isSecureContext) {
       setStatus("当前不是安全上下文。Web Bluetooth 需要 HTTPS 或 localhost。", false);
