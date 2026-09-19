@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "as5600.h"
 #include "bldc.h"
 #include "bmi088.h"
 
@@ -21,6 +22,9 @@ void gatt_svr_notify_imu(const bmi088_vec3_t *acc, const bmi088_vec3_t *gyr);
 
 /** 已订阅时推送 14 字节 LE：rpm×10, en, pad, u/v/w×1000, θ°×10, m×1000。 */
 void gatt_svr_notify_bldc(const bldc_status_t *st);
+
+/** 已订阅时推送 8 字节 LE：raw, deg×10, rpm×10, flags(MD/ML/MH), pad。 */
+void gatt_svr_notify_as5600(const as5600_sample_t *s);
 
 #ifdef __cplusplus
 }

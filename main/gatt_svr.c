@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "as5600.h"
 #include "bldc.h"
 #include "bmi088.h"
 #include "esp_mac.h"
@@ -32,18 +33,27 @@ static const ble_uuid16_t imu_chr_uuid =
 static const ble_uuid16_t bldc_chr_uuid =
     BLE_UUID16_INIT(0xFFE3);
 
+/* AS5600：0000ffe4-0000-1000-8000-00805f9b34fb */
+static const ble_uuid16_t as5600_chr_uuid =
+    BLE_UUID16_INIT(0xFFE4);
+
 #define IMU_PAYLOAD_LEN 12
 #define BLDC_PAYLOAD_LEN 14
+#define AS5600_PAYLOAD_LEN 8
 
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_imu_val_handle;
 static uint16_t s_bldc_val_handle;
+static uint16_t s_as5600_val_handle;
 static bool s_imu_notify;
 static bool s_bldc_notify;
+static bool s_as5600_notify;
 static uint8_t s_imu_last[IMU_PAYLOAD_LEN];
 static uint16_t s_imu_last_len;
 static uint8_t s_bldc_last[BLDC_PAYLOAD_LEN];
 static uint16_t s_bldc_last_len;
+static uint8_t s_as5600_last[AS5600_PAYLOAD_LEN];
+static uint16_t s_as5600_last_len;
 
 /* 最近一次 Write 的内容（最多 20 字节） */
 #define WRITE_BUF_SIZE 20
@@ -56,6 +66,8 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                              struct ble_gatt_access_ctxt *ctxt, void *arg);
 static int bldc_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                               struct ble_gatt_access_ctxt *ctxt, void *arg);
+static int as5600_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                struct ble_gatt_access_ctxt *ctxt, void *arg);
 
 static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     {
@@ -83,6 +95,12 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
                          BLE_GATT_CHR_F_WRITE |
                          BLE_GATT_CHR_F_WRITE_NO_RSP |
                          BLE_GATT_CHR_F_NOTIFY,
+            },
+            {
+                .uuid = &as5600_chr_uuid.u,
+                .access_cb = as5600_chr_access_cb,
+                .val_handle = &s_as5600_val_handle,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
             },
             {
                 0,
@@ -135,6 +153,38 @@ static void pack_bldc(uint8_t out[BLDC_PAYLOAD_LEN], const bldc_status_t *st)
     out[2] = st->enabled ? 1 : 0;
     out[3] = 0;
     memcpy(out + 4, fields, 10);
+}
+
+static void pack_as5600(uint8_t out[AS5600_PAYLOAD_LEN], const as5600_sample_t *s)
+{
+    float deg = s->angle_deg;
+    if (deg < 0.0f) {
+        deg += 360.0f;
+    }
+    if (deg >= 360.0f) {
+        deg -= 360.0f;
+    }
+    uint16_t raw = s->raw;
+    uint16_t deg_x10 = clamp_u16_frac(deg, 10.0f);
+    if (deg_x10 > 3599) {
+        deg_x10 = 3599;
+    }
+    int16_t rpm_x10 = clamp_i16(lroundf(s->rpm * 10.0f));
+    uint8_t flags = 0;
+    if (s->magnet_ok) {
+        flags |= 0x01;
+    }
+    if (s->magnet_weak) {
+        flags |= 0x02;
+    }
+    if (s->magnet_strong) {
+        flags |= 0x04;
+    }
+    memcpy(out, &raw, 2);
+    memcpy(out + 2, &deg_x10, 2);
+    memcpy(out + 4, &rpm_x10, 2);
+    out[6] = flags;
+    out[7] = 0;
 }
 
 static char *trim_cmd(char *cmd, uint16_t len)
@@ -406,6 +456,7 @@ void gatt_svr_on_disconnect(void)
     s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
     s_imu_notify = false;
     s_bldc_notify = false;
+    s_as5600_notify = false;
 }
 
 void gatt_svr_on_subscribe(uint16_t attr_handle, uint16_t conn_handle, bool notify_enabled)
@@ -420,6 +471,12 @@ void gatt_svr_on_subscribe(uint16_t attr_handle, uint16_t conn_handle, bool noti
         s_conn_handle = conn_handle;
         s_bldc_notify = notify_enabled;
         printf("BLDC notify %s, conn=%u\n", notify_enabled ? "on" : "off", conn_handle);
+        return;
+    }
+    if (attr_handle == s_as5600_val_handle) {
+        s_conn_handle = conn_handle;
+        s_as5600_notify = notify_enabled;
+        printf("AS5600 notify %s, conn=%u\n", notify_enabled ? "on" : "off", conn_handle);
     }
 }
 
@@ -438,6 +495,23 @@ void gatt_svr_notify_bldc(const bldc_status_t *st)
     }
 
     (void)ble_gatts_notify_custom(s_conn_handle, s_bldc_val_handle, om);
+}
+
+void gatt_svr_notify_as5600(const as5600_sample_t *s)
+{
+    if (!s_as5600_notify || s_conn_handle == BLE_HS_CONN_HANDLE_NONE || s == NULL) {
+        return;
+    }
+
+    pack_as5600(s_as5600_last, s);
+    s_as5600_last_len = AS5600_PAYLOAD_LEN;
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(s_as5600_last, AS5600_PAYLOAD_LEN);
+    if (om == NULL) {
+        return;
+    }
+
+    (void)ble_gatts_notify_custom(s_conn_handle, s_as5600_val_handle, om);
 }
 
 static int bldc_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
@@ -476,6 +550,30 @@ static int bldc_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     default:
         return BLE_ATT_ERR_UNLIKELY;
     }
+}
+
+static int as5600_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    uint8_t zeros[AS5600_PAYLOAD_LEN] = {0};
+    if (s_as5600_last_len == 0) {
+        as5600_sample_t s;
+        if (as5600_read(&s) == ESP_OK) {
+            pack_as5600(s_as5600_last, &s);
+            s_as5600_last_len = AS5600_PAYLOAD_LEN;
+        }
+    }
+    const uint8_t *data = s_as5600_last_len ? s_as5600_last : zeros;
+    int rc = os_mbuf_append(ctxt->om, data, AS5600_PAYLOAD_LEN);
+    return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
 void gatt_svr_notify_imu(const bmi088_vec3_t *acc, const bmi088_vec3_t *gyr)

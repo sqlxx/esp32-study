@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include "as5600.h"
 #include "bldc.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -22,6 +23,7 @@
 
 static const char *TAG = "BLE";
 static const char *IMU_TAG = "IMU";
+static const char *ENC_TAG = "AS5600";
 static const char *DEVICE_NAME = "ESP32-Hello";
 
 static uint8_t own_addr_type;
@@ -102,6 +104,7 @@ static void start_advertising(void)
     printf("0xFFE1: Write 角度 / scan / stop / spd:1~10\n");
     printf("0xFFE2: Notify IMU acc[g] + gyro[dps]\n");
     printf("0xFFE3: Write on/off/rpm:30 ，Notify 三相占空比\n");
+    printf("0xFFE4: Notify AS5600 raw / deg / rpm / magnet\n");
 }
 
 static int gap_event_handler(struct ble_gap_event *event, void *arg)
@@ -227,6 +230,33 @@ static void bldc_notify_task(void *arg)
     }
 }
 
+static void as5600_task(void *arg)
+{
+    (void)arg;
+    as5600_sample_t s;
+    as5600_sample_t last = {0};
+    int log_div = 0;
+
+    while (true) {
+        if (as5600_read(&s) == ESP_OK) {
+            last = s;
+            gatt_svr_notify_as5600(&s);
+            if (++log_div >= 10) {
+                log_div = 0;
+                ESP_LOGI(ENC_TAG, "raw=%4u  deg=%6.1f  rpm=%7.1f  mag=%s%s%s",
+                         s.raw, (double)s.angle_deg, (double)s.rpm,
+                         s.magnet_ok ? "OK" : "NO",
+                         s.magnet_weak ? " weak" : "",
+                         s.magnet_strong ? " strong" : "");
+            }
+        } else {
+            gatt_svr_notify_as5600(&last);
+            ESP_LOGE(ENC_TAG, "read failed");
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
 void app_main(void)
 {
     int rc;
@@ -261,6 +291,15 @@ void app_main(void)
     }
     if (xTaskCreate(bldc_notify_task, "bldc_n", 2048, NULL, 4, NULL) != pdPASS) {
         ESP_LOGE(TAG, "create bldc notify task failed");
+    }
+
+    ret = as5600_init();
+    if (ret == ESP_OK) {
+        if (xTaskCreate(as5600_task, "as5600", 3072, NULL, 4, NULL) != pdPASS) {
+            ESP_LOGE(ENC_TAG, "create as5600 task failed");
+        }
+    } else {
+        ESP_LOGE(ENC_TAG, "init failed: %s", esp_err_to_name(ret));
     }
 
     // 初始化NimBLE（INFO 会每条 notify 打一遍 GATT procedure）

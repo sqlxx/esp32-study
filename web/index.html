@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ESP32 IMU / 舵机 / 无刷</title>
+  <title>ESP32 IMU / 舵机 / 无刷 / 编码器</title>
   <style>
     :root {
       --bg: #0f1419;
@@ -253,7 +253,7 @@
       gap: 10px;
       margin-top: 12px;
     }
-    #phaseView, #vecView {
+    #phaseView, #vecView, #encView {
       width: 100%;
       height: 240px;
       display: block;
@@ -275,10 +275,10 @@
 </head>
 <body>
   <main>
-    <h1>ESP32 IMU / 舵机 / 无刷</h1>
+    <h1>ESP32 IMU / 舵机 / 无刷 / 编码器</h1>
     <p class="sub">
       Chrome 连接 <code>ESP32-Hello</code>。BLE Service <code>0xFFE0</code>：
-      舵机 <code>0xFFE1</code>，IMU <code>0xFFE2</code>，无刷 <code>0xFFE3</code>。
+      舵机 <code>0xFFE1</code>，IMU <code>0xFFE2</code>，无刷 <code>0xFFE3</code>，编码器 <code>0xFFE4</code>。
     </p>
 
     <section class="card">
@@ -293,6 +293,7 @@
       <button class="tab" type="button" role="tab" id="tabImu" data-tab="imu" aria-selected="true">IMU</button>
       <button class="tab" type="button" role="tab" id="tabServo" data-tab="servo" aria-selected="false">舵机</button>
       <button class="tab" type="button" role="tab" id="tabBldc" data-tab="bldc" aria-selected="false">无刷</button>
+      <button class="tab" type="button" role="tab" id="tabEnc" data-tab="enc" aria-selected="false">编码器</button>
     </div>
 
     <div id="panelImu" class="panel is-on" role="tabpanel" aria-labelledby="tabImu">
@@ -450,6 +451,38 @@ Y +000.0</div>
       U/V/W → GPIO25/26/32。 电机电源不要走 USB，与 ESP32 共地。先小转速、小 m，确认转向再往上加。
     </section>
     </div>
+
+    <div id="panelEnc" class="panel" role="tabpanel" aria-labelledby="tabEnc">
+    <section class="card">
+      <div class="label">AS5600 机械角（0° 在正上，顺时针增大）</div>
+      <div class="view-wrap">
+        <canvas id="encView"></canvas>
+      </div>
+      <div class="bldc-meta imu-grid">
+        <div class="imu-cell">
+          <div class="k">Raw</div>
+          <div class="v" id="encRaw">0000</div>
+        </div>
+        <div class="imu-cell">
+          <div class="k">机械角</div>
+          <div class="v" id="encDeg">+000.0°</div>
+        </div>
+        <div class="imu-cell">
+          <div class="k">实测转速</div>
+          <div class="v" id="encRpm">+000.0</div>
+        </div>
+        <div class="imu-cell">
+          <div class="k">磁铁</div>
+          <div class="v" id="encMag">——</div>
+          <div class="imu-flag" id="encMagFlag">未连接</div>
+        </div>
+      </div>
+    </section>
+    <section class="card tips">
+      特征 <code>0xFFE4</code> Notify：raw、<code>deg×10</code>、<code>rpm×10</code>、磁铁状态。
+      I2C SDA/SCL → GPIO21/22，模块已带 10k 上拉。开环无刷不依赖此传感器。
+    </section>
+    </div>
   </main>
 
   <script type="importmap">
@@ -468,6 +501,7 @@ Y +000.0</div>
     const CHAR_UUID = 0xFFE1;
     const IMU_UUID = 0xFFE2;
     const BLDC_UUID = 0xFFE3;
+    const ENC_UUID = 0xFFE4;
     const DEG = Math.PI / 180;
     const ALPHA = 0.98;
     const CALIB_MS = 1500;
@@ -521,12 +555,20 @@ Y +000.0</div>
     const bldcRpm = document.getElementById("bldcRpm");
     const bldcMod = document.getElementById("bldcMod");
     const bldcVec = document.getElementById("bldcVec");
+    const encCanvas = document.getElementById("encView");
+    const encCtx = encCanvas.getContext("2d");
+    const encRaw = document.getElementById("encRaw");
+    const encDeg = document.getElementById("encDeg");
+    const encRpm = document.getElementById("encRpm");
+    const encMag = document.getElementById("encMag");
+    const encMagFlag = document.getElementById("encMagFlag");
 
     let device = null;
     let server = null;
     let characteristic = null;
     let imuChar = null;
     let bldcChar = null;
+    let encChar = null;
     let writeBusy = false;
     let pendingAngle = null;
     let lastWriteAt = 0;
@@ -641,6 +683,7 @@ Y +000.0</div>
       document.getElementById("panelImu").classList.toggle("is-on", name === "imu");
       document.getElementById("panelServo").classList.toggle("is-on", name === "servo");
       document.getElementById("panelBldc").classList.toggle("is-on", name === "bldc");
+      document.getElementById("panelEnc").classList.toggle("is-on", name === "enc");
       if (name === "imu") {
         requestAnimationFrame(resizeRenderer);
       }
@@ -649,6 +692,9 @@ Y +000.0</div>
           drawPhaseView();
           drawVecView();
         });
+      }
+      if (name === "enc") {
+        requestAnimationFrame(drawEncView);
       }
     }
 
@@ -874,6 +920,7 @@ Y +000.0</div>
         resetPhaseHist();
         drawPhaseView();
         drawVecView();
+        paintEnc({ raw: 0, deg: 0, rpm: 0, magnetOk: false, magnetWeak: false, magnetStrong: false, connected: false });
         stopScanPoll();
         setScanUi(false);
         angleSlider.disabled = true;
@@ -1137,6 +1184,127 @@ Y +000.0</div>
       }
     }
 
+    let encAngle = 0;
+
+    function resizeEncView() {
+      const w = encCanvas.clientWidth;
+      const h = encCanvas.clientHeight;
+      if (w < 2 || h < 2) {
+        return false;
+      }
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const pw = Math.round(w * dpr);
+      const ph = Math.round(h * dpr);
+      if (encCanvas.width !== pw || encCanvas.height !== ph) {
+        encCanvas.width = pw;
+        encCanvas.height = ph;
+      }
+      return true;
+    }
+
+    function drawEncView() {
+      if (!resizeEncView()) {
+        return;
+      }
+      const width = encCanvas.width;
+      const height = encCanvas.height;
+      const cx = width / 2;
+      const cy = height / 2;
+      const r = Math.min(width, height) * 0.38;
+
+      encCtx.fillStyle = "#0b111a";
+      encCtx.fillRect(0, 0, width, height);
+
+      encCtx.strokeStyle = "#223044";
+      encCtx.lineWidth = 1;
+      encCtx.beginPath();
+      encCtx.arc(cx, cy, r, 0, Math.PI * 2);
+      encCtx.stroke();
+
+      encCtx.strokeStyle = "#3d4d66";
+      for (let i = 0; i < 12; i++) {
+        const a = (i * 30 - 90) * Math.PI / 180;
+        const inner = i % 3 === 0 ? r * 0.82 : r * 0.9;
+        encCtx.beginPath();
+        encCtx.moveTo(cx + Math.cos(a) * inner, cy + Math.sin(a) * inner);
+        encCtx.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+        encCtx.stroke();
+      }
+
+      encCtx.fillStyle = "#8b9bb4";
+      encCtx.font = "600 12px ui-sans-serif, sans-serif";
+      encCtx.textAlign = "center";
+      encCtx.textBaseline = "middle";
+      encCtx.fillText("0", cx, cy - r - 14);
+      encCtx.fillText("90", cx + r + 16, cy);
+      encCtx.fillText("180", cx, cy + r + 14);
+      encCtx.fillText("270", cx - r - 18, cy);
+
+      const needle = (encAngle - 90) * Math.PI / 180;
+      const nx = cx + Math.cos(needle) * r * 0.78;
+      const ny = cy + Math.sin(needle) * r * 0.78;
+      encCtx.strokeStyle = "#3d9cfd";
+      encCtx.lineWidth = 3;
+      encCtx.beginPath();
+      encCtx.moveTo(cx, cy);
+      encCtx.lineTo(nx, ny);
+      encCtx.stroke();
+      encCtx.fillStyle = "#e7ecf3";
+      encCtx.beginPath();
+      encCtx.arc(cx, cy, 5, 0, Math.PI * 2);
+      encCtx.fill();
+      encCtx.fillStyle = "#3d9cfd";
+      encCtx.beginPath();
+      encCtx.arc(nx, ny, 4, 0, Math.PI * 2);
+      encCtx.fill();
+    }
+
+    function magnetLabel(st) {
+      if (!st.connected) {
+        return { text: "——", flag: "未连接", color: "var(--muted)" };
+      }
+      if (!st.magnetOk) {
+        return { text: "未检测到", flag: "检查磁铁气隙", color: "var(--err)" };
+      }
+      if (st.magnetWeak) {
+        return { text: "过弱", flag: "磁铁太远", color: "var(--err)" };
+      }
+      if (st.magnetStrong) {
+        return { text: "过强", flag: "磁铁太近", color: "var(--err)" };
+      }
+      return { text: "正常", flag: "MD", color: "var(--ok)" };
+    }
+
+    function paintEnc(st) {
+      encAngle = st.deg;
+      encRaw.textContent = String(st.raw).padStart(4, "0");
+      encDeg.textContent = `${fmtFixed(st.deg, 3, 1)}°`;
+      encRpm.textContent = fmtFixed(st.rpm, 3, 1);
+      const mag = magnetLabel(st);
+      encMag.textContent = mag.text;
+      encMag.style.color = mag.color;
+      encMagFlag.textContent = mag.flag;
+      encMagFlag.style.color = mag.color;
+      drawEncView();
+    }
+
+    function onEncNotify(event) {
+      const v = event.target.value;
+      if (v.byteLength < 8) {
+        return;
+      }
+      const flags = v.getUint8(6);
+      paintEnc({
+        raw: v.getUint16(0, true),
+        deg: v.getUint16(2, true) / 10,
+        rpm: v.getInt16(4, true) / 10,
+        magnetOk: (flags & 0x01) !== 0,
+        magnetWeak: (flags & 0x02) !== 0,
+        magnetStrong: (flags & 0x04) !== 0,
+        connected: true,
+      });
+    }
+
     function onBldcNotify(event) {
       const v = event.target.value;
       if (v.byteLength < 14) {
@@ -1304,6 +1472,21 @@ Y +000.0</div>
       bldcChar = null;
     }
 
+    async function stopEncNotify() {
+      if (!encChar) {
+        return;
+      }
+      try {
+        encChar.removeEventListener("characteristicvaluechanged", onEncNotify);
+        if (encChar.properties.notify) {
+          await encChar.stopNotifications();
+        }
+      } catch (_) {
+        /* ignore */
+      }
+      encChar = null;
+    }
+
     async function connect() {
       if (!navigator.bluetooth) {
         setStatus("当前浏览器不支持 Web Bluetooth（请用 Android / 桌面 Chrome）", false);
@@ -1322,6 +1505,7 @@ Y +000.0</div>
           server = null;
           imuChar = null;
           bldcChar = null;
+          encChar = null;
           stopScanPoll();
           setConnected(false);
           setStatus("已断开", false);
@@ -1337,12 +1521,16 @@ Y +000.0</div>
         bldcChar = await service.getCharacteristic(BLDC_UUID);
         bldcChar.addEventListener("characteristicvaluechanged", onBldcNotify);
         await bldcChar.startNotifications();
+        encChar = await service.getCharacteristic(ENC_UUID);
+        encChar.addEventListener("characteristicvaluechanged", onEncNotify);
+        await encChar.startNotifications();
 
         setConnected(true);
         setStatus(`已连接 ${device.name || ""}`.trim(), true);
       } catch (err) {
         await stopImuNotify();
         await stopBldcNotify();
+        await stopEncNotify();
         setStatus(`连接失败：${err.message}`, false);
         setConnected(false);
       }
@@ -1355,6 +1543,7 @@ Y +000.0</div>
       stopScanPoll();
       await stopImuNotify();
       await stopBldcNotify();
+      await stopEncNotify();
       if (device && device.gatt.connected) {
         device.gatt.disconnect();
       }
@@ -1494,6 +1683,8 @@ Y +000.0</div>
         setStatus(`停止失败：${err.message}`, false);
       }
     });
+
+    paintEnc({ raw: 0, deg: 0, rpm: 0, magnetOk: false, magnetWeak: false, magnetStrong: false, connected: false });
 
     if (!window.isSecureContext) {
       setStatus("当前不是安全上下文。Web Bluetooth 需要 HTTPS 或 localhost。", false);
