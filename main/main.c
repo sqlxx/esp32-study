@@ -103,7 +103,7 @@ static void start_advertising(void)
     printf("可用 nRF Connect，或打开 web/index.html（Chrome + Web Bluetooth）\n");
     printf("0xFFE1: Write 角度 / scan / stop / spd:1~10\n");
     printf("0xFFE2: Notify IMU acc[g] + gyro[dps]\n");
-    printf("0xFFE3: Write on/off/rpm:30 ，Notify 三相占空比\n");
+    printf("0xFFE3: Write on/off/rpm:30/m:0.15/mode:vel/mode:pos/deg:90/vkp:/vki:/tau:/pkp:/pki: ，Notify 三相占空比\n");
     printf("0xFFE4: Notify AS5600 raw / deg / rpm / magnet\n");
 }
 

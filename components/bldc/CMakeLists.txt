@@ -1,13 +1,19 @@
 idf_component_register(
     SRCS
         "bldc.c"
+        "bldc_ctrl.c"
+        "bldc_foc.c"
+        "bldc_lpf.c"
+        "bldc_pi.c"
         "bldc_pwm.c"
     INCLUDE_DIRS
         "include"
     PRIV_INCLUDE_DIRS
         "."
     PRIV_REQUIRES
+        as5600
         esp_driver_mcpwm
         esp_driver_gpio
+        esp_timer
         freertos
 )

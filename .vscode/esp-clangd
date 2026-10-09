@@ -1,0 +1,47 @@
+#!/bin/bash
+# Launch the newest installed Espressif clangd, with builtin headers from the
+# matching esp-clang package. Toolchain upgrades do not require editing settings.
+set -euo pipefail
+
+tools="${HOME}/.espressif/tools"
+clangd_root="${tools}/esp-clangd"
+clang_root="${tools}/esp-clang"
+
+shopt -s nullglob
+latest=""
+latest_key=""
+for dir in "${clangd_root}"/esp-*; do
+    bin="${dir}/esp-clangd/bin/clangd"
+    [[ -x "${bin}" ]] || continue
+    name="$(basename "${dir}")"
+    ver="${name#esp-}"
+    num="${ver%%_*}"
+    date="${ver#*_}"
+    [[ "${date}" == "${ver}" ]] && date="0"
+    IFS=. read -r maj min pat <<<"${num}"
+    pat="${pat%%[^0-9]*}"
+    key="$(printf '%05d%05d%05d%s' "${maj:-0}" "${min:-0}" "${pat:-0}" "${date}")"
+    if [[ -z "${latest_key}" || "${key}" > "${latest_key}" ]]; then
+        latest_key="${key}"
+        latest="${dir}"
+    fi
+done
+
+if [[ -z "${latest}" ]]; then
+    echo "esp-clangd: no clangd under ${clangd_root}" >&2
+    exit 1
+fi
+
+verdir="$(basename "${latest}")"
+resource_dir=""
+for header in "${clang_root}/${verdir}/esp-clang/lib/clang/"*/include/float.h; do
+    [[ -f "${header}" ]] || continue
+    resource_dir="$(cd "$(dirname "${header}")/.." && pwd)"
+done
+
+if [[ -z "${resource_dir}" ]]; then
+    echo "esp-clangd: no builtin headers for ${verdir} under ${clang_root}" >&2
+    exec "${latest}/esp-clangd/bin/clangd" "$@"
+fi
+
+exec "${latest}/esp-clangd/bin/clangd" --resource-dir="${resource_dir}" "$@"

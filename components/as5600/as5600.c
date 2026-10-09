@@ -3,6 +3,8 @@
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h" // IWYU pragma: keep
+#include "freertos/semphr.h"
 
 static const char *TAG = "as5600";
 
@@ -17,17 +19,15 @@ static const char *TAG = "as5600";
 #define AS5600_STATUS_ML     (1u << 4)
 #define AS5600_STATUS_MD     (1u << 5)
 #define AS5600_RAW_MAX       4096
-#define AS5600_RPM_WIN_US    200000
-#define AS5600_RPM_DEADZONE  0.4f
+#define AS5600_SPEED_US      1000
 
 static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_dev;
+static SemaphoreHandle_t s_lock;
 static bool s_ready;
 static bool s_have_prev;
 static uint16_t s_prev_raw;
-static int32_t s_unwrapped;
-static int32_t s_rpm_ref_unwrap;
-static int64_t s_rpm_ref_us;
+static int64_t s_prev_us;
 static float s_rpm;
 
 static void teardown(void)
@@ -42,9 +42,7 @@ static void teardown(void)
     }
     s_ready = false;
     s_have_prev = false;
-    s_unwrapped = 0;
-    s_rpm_ref_unwrap = 0;
-    s_rpm_ref_us = 0;
+    s_prev_us = 0;
     s_rpm = 0.0f;
 }
 
@@ -55,6 +53,12 @@ static esp_err_t read_regs(uint8_t start, uint8_t *buf, size_t len)
 
 esp_err_t as5600_init(void)
 {
+    if (s_lock == NULL) {
+        s_lock = xSemaphoreCreateMutex();
+        if (s_lock == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
     if (s_ready) {
         return ESP_OK;
     }
@@ -109,54 +113,47 @@ esp_err_t as5600_init(void)
     return ESP_OK;
 }
 
-esp_err_t as5600_read(as5600_sample_t *out)
+static esp_err_t read_sample(as5600_sample_t *out)
 {
-    if (out == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (!s_ready) {
+    if (s_lock == NULL || !s_ready) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(AS5600_XFER_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
     }
 
     uint8_t buf[5];
     esp_err_t err = read_regs(AS5600_REG_STATUS, buf, sizeof(buf));
     if (err != ESP_OK) {
+        xSemaphoreGive(s_lock);
         return err;
     }
 
     const uint8_t status = buf[0];
     const uint16_t raw = (uint16_t)(((buf[3] & 0x0F) << 8) | buf[4]);
     const int64_t now_us = esp_timer_get_time();
-
-    if (!s_have_prev) {
-        s_unwrapped = (int32_t)raw;
-        s_rpm_ref_unwrap = s_unwrapped;
-        s_rpm_ref_us = now_us;
+    const uint16_t prev_raw = s_prev_raw;
+    const bool first = !s_have_prev;
+    if (first) {
         s_rpm = 0.0f;
+        s_prev_raw = raw;
+        s_prev_us = now_us;
+        s_have_prev = true;
     } else {
-        int32_t delta = (int32_t)raw - (int32_t)s_prev_raw;
-        if (delta > (AS5600_RAW_MAX / 2)) {
-            delta -= AS5600_RAW_MAX;
-        } else if (delta < -(AS5600_RAW_MAX / 2)) {
-            delta += AS5600_RAW_MAX;
-        }
-        s_unwrapped += delta;
-
-        const int64_t win_us = now_us - s_rpm_ref_us;
-        if (win_us >= AS5600_RPM_WIN_US) {
-            const float dt = (float)win_us * 1e-6f;
-            float rpm = ((float)(s_unwrapped - s_rpm_ref_unwrap) / (float)AS5600_RAW_MAX) / dt * 60.0f;
-            if (rpm > -AS5600_RPM_DEADZONE && rpm < AS5600_RPM_DEADZONE) {
-                rpm = 0.0f;
+        const int64_t dt_us = now_us - s_prev_us;
+        if (dt_us >= AS5600_SPEED_US) {
+            int32_t delta = (int32_t)raw - (int32_t)prev_raw;
+            if (delta > (AS5600_RAW_MAX / 2)) {
+                delta -= AS5600_RAW_MAX;
+            } else if (delta < -(AS5600_RAW_MAX / 2)) {
+                delta += AS5600_RAW_MAX;
             }
-            s_rpm = rpm;
-            s_rpm_ref_unwrap = s_unwrapped;
-            s_rpm_ref_us = now_us;
+            const float dt = (float)dt_us * 1e-6f;
+            s_rpm = ((float)delta / (float)AS5600_RAW_MAX) / dt * 60.0f;
+            s_prev_raw = raw;
+            s_prev_us = now_us;
         }
     }
-
-    s_prev_raw = raw;
-    s_have_prev = true;
 
     out->raw = raw;
     out->angle_deg = (float)raw * (360.0f / (float)AS5600_RAW_MAX);
@@ -164,5 +161,40 @@ esp_err_t as5600_read(as5600_sample_t *out)
     out->magnet_ok = (status & AS5600_STATUS_MD) != 0;
     out->magnet_weak = (status & AS5600_STATUS_ML) != 0;
     out->magnet_strong = (status & AS5600_STATUS_MH) != 0;
+    xSemaphoreGive(s_lock);
     return ESP_OK;
+}
+
+esp_err_t as5600_read(as5600_sample_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return read_sample(out);
+}
+
+esp_err_t as5600_read_angle_deg(float *angle_deg)
+{
+    if (angle_deg == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    as5600_sample_t sample;
+    esp_err_t err = read_sample(&sample);
+    if (err == ESP_OK) {
+        *angle_deg = sample.angle_deg;
+    }
+    return err;
+}
+
+esp_err_t as5600_read_rpm(float *rpm)
+{
+    if (rpm == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    as5600_sample_t sample;
+    esp_err_t err = read_sample(&sample);
+    if (err == ESP_OK) {
+        *rpm = sample.rpm;
+    }
+    return err;
 }

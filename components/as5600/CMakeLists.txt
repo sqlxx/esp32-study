@@ -6,4 +6,5 @@ idf_component_register(
     PRIV_REQUIRES
         esp_driver_i2c
         esp_timer
+        freertos
 )

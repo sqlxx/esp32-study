@@ -215,6 +215,64 @@ static int handle_bldc_cmd(const char *p)
     }
 
     const char *num = NULL;
+    if (strncmp(p, "mode:", 5) == 0) {
+        const char *mode = p + 5;
+        bldc_motion_t motion;
+        if (strcmp(mode, "ol") == 0 || strcmp(mode, "open") == 0) {
+            motion = BLDC_MOTION_OPENLOOP;
+        } else if (strcmp(mode, "pos") == 0 || strcmp(mode, "position") == 0) {
+            motion = BLDC_MOTION_POSITION;
+        } else if (strcmp(mode, "vel") == 0 || strcmp(mode, "velocity") == 0 ||
+                   strcmp(mode, "spd") == 0 || strcmp(mode, "speed") == 0) {
+            motion = BLDC_MOTION_VELOCITY;
+        } else {
+            printf("BLDC: mode 用 ol、vel 或 pos\n");
+            return 0;
+        }
+        if (bldc_set_motion(motion) != ESP_OK) {
+            printf("BLDC: 切换模式失败，速度环和位置环需要 AS5600\n");
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        return 0;
+    }
+    if (strncmp(p, "deg:", 4) == 0) {
+        char *end = NULL;
+        float deg = strtof(p + 4, &end);
+        if (end == p + 4 || (end && *end != '\0')) {
+            printf("BLDC: deg 格式无效，示例 deg:90\n");
+            return 0;
+        }
+        return bldc_set_position_deg(deg) == ESP_OK ? 0 : BLE_ATT_ERR_UNLIKELY;
+    }
+    {
+        static const struct {
+            const char *key;
+            esp_err_t (*set)(float);
+        } gains[] = {
+            {"vkp:", bldc_set_velocity_kp},
+            {"vki:", bldc_set_velocity_ki},
+            {"tau:", bldc_set_velocity_tau},
+            {"pkp:", bldc_set_position_kp},
+            {"pki:", bldc_set_position_ki},
+        };
+        for (size_t i = 0; i < sizeof(gains) / sizeof(gains[0]); i++) {
+            const size_t n = strlen(gains[i].key);
+            if (strncmp(p, gains[i].key, n) != 0) {
+                continue;
+            }
+            char *end = NULL;
+            const float v = strtof(p + n, &end);
+            if (end == p + n || end == NULL || *end != '\0') {
+                printf("BLDC: %s 格式无效\n", gains[i].key);
+                return 0;
+            }
+            if (gains[i].set(v) != ESP_OK) {
+                printf("BLDC: %s 超出范围（kp/ki 0~1000，tau 0~10）\n", gains[i].key);
+                return BLE_ATT_ERR_UNLIKELY;
+            }
+            return 0;
+        }
+    }
     if (strncmp(p, "rpm:", 4) == 0) {
         num = p + 4;
     } else if (strncmp(p, "m:", 2) == 0) {
@@ -226,7 +284,7 @@ static int handle_bldc_cmd(const char *p)
         }
         return bldc_set_modulation(m) == ESP_OK ? 0 : BLE_ATT_ERR_UNLIKELY;
     } else if (*p == '\0' || (!isdigit((unsigned char)*p) && *p != '-' && *p != '+')) {
-        printf("BLDC: 未知命令（on/off/rpm:30/m:0.15）\n");
+        printf("BLDC: 未知命令（on/off/rpm:30/m:0.15/mode:vel/mode:pos/deg:90/vkp:/vki:/tau:/pkp:/pki:）\n");
         return 0;
     } else {
         num = p;
